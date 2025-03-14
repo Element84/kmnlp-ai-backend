@@ -1,0 +1,40 @@
+stages:
+  - build
+  - lint
+  - test
+
+# Build the Docker image
+build_image:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t llm-agent -f Dockerfile .
+  only:
+    - merge_requests
+    - main
+
+# Define a linting job
+lint:
+  stage: lint
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker run --rm llm-agent /opt/src/scripts/lint.sh
+  only:
+    - merge_requests
+    - main
+
+# Define a unit test job
+unit_tests:
+  stage: test
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker run --rm llm-agent /opt/src/scripts/test.sh
+  only:
+    - merge_requests
+    - main
