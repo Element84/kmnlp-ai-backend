@@ -6,12 +6,16 @@
 
 set -e -o pipefail
 
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+echo "Running shellcheck"
+"$SCRIPT_DIR/shellcheck.sh"
+
 echo "Running Ruff"
-ruff check src/ tests/
+ruff check src/ tests/ evals/
 echo "---"
 
 echo "Running pyright"
-pyright src/ tests/
+pyright src/ tests/ evals/
 echo "---"
 
 echo "Checking if code has been formatted with Ruff"

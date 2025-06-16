@@ -26,23 +26,83 @@ if TYPE_CHECKING:
     from shapely.geometry.base import BaseGeometry
 
 
-def compute(data_array: "xr.DataArray") -> "xr.DataArray":
+class DaskArrayComputeError(Exception):
+    """Failure to compute values from a dask DataArray."""
+
+
+# This wraps compute_dask_array() to customize the docstring which is part of
+# ScientificPythonAgent's prompt.
+def compute(data_array: xr.DataArray) -> xr.DataArray:
     """Wraps data_array.compute() to correctly handle async dask clients.
 
     Always use this function instead of directly calling .compute(). Also,
     always call this function on a data_array before calling .values or
     .to_numpy() or .as_numpy() or .item() etc.
     """
+    return compute_dask_array(data_array)
+
+
+def compute_dask_array(data_array: xr.DataArray) -> xr.DataArray:
+    """Convert to non-lazy array, accounting for possibly async dask client.
+
+    - If data_array is not a dask array, return it as is.
+    - If data_array is already computed, return it as is.
+    - If there is no active dask client, call data_array.compute() directly.
+    - If dask client is asynchronous, use asyncio.run() to run computation.
+    - If dask client is synchronous, use client.sync() to run computation.
+    - If computation does not result in a DataArray, raise an error.
+
+    Raises:
+        DaskArrayComputeError: If computation fails for any reason.
+    """
+    if data_array.chunks is None:
+        # not a dask array
+        return data_array
+
     try:
         client = get_client()
     except ValueError:
-        # no dask client available
+        # no active Dask client, compute directly
         return data_array.compute()  # type: ignore[reportUnknownMemberType]
-    out = client.compute(data_array)  # type: ignore[reportUnknownMemberType]
-    result = client.sync(out.result)  # type: ignore[reportUnknownVariableType]
-    if isinstance(result, Future):
-        result = asyncio.run(result)  # type: ignore[reportUnknownVariableType]
-    return result  # type: ignore[reportUnknownMemberType]
+
+    # client.compute()'s docs say that it returns a Future or list of Futures,
+    # but its inferred return type is:
+    #     Unknown |
+    #     Generator[Generator[Unknown, None, None] |
+    #     CoroutineType[Any, Any, Unknown] | Unknown, None, None] |
+    #     CoroutineType[Any, Any, Unknown] |
+    #     list[Unknown]  # noqa: ERA001
+    # Hence the extra type checks below.
+    compute_output = client.compute(data_array)  # type: ignore[reportUnknownMemberType]
+
+    if isinstance(compute_output, xr.DataArray):
+        return compute_output
+
+    if not isinstance(compute_output, Future):
+        msg = (
+            "client.compute() returned unexpected type "
+            f"{type(compute_output)}."  # type: ignore[reportUnknownArgumentType]
+        )
+        raise DaskArrayComputeError(msg)
+
+    try:
+        # sync or await result depending on client state
+        if client.asynchronous:
+            coroutine = compute_output.result()  # type: ignore[reportUnknownMemberType]
+            result = asyncio.run(coroutine)  # type: ignore[reportUnknownArgumentType]
+        else:
+            result = client.sync(compute_output.result)  # type: ignore[reportUnknownMemberType]
+    except Exception as e:
+        method = "asyncio.run()" if client.asynchronous else "client.sync()"
+        msg = f"Error encountered when calling {method} on .compute() output."
+        raise DaskArrayComputeError(msg) from e
+
+    if not isinstance(result, xr.DataArray):
+        method = "asyncio.run()" if client.asynchronous else "client.sync()"
+        msg = f"{method} returned unexpected type {type(result)}."  # type: ignore[reportUnknownArgumentType]
+        raise DaskArrayComputeError(msg)
+
+    return result
 
 
 def geographic_coords_to_decimal_coords(coords: str) -> float:
@@ -61,11 +121,11 @@ def geographic_coords_to_decimal_coords(coords: str) -> float:
 
 # support for type args for slice was added in Python 3.13
 def filter_data_array(
-    data_array: "xr.DataArray",
+    data_array: xr.DataArray,
     time: "slice[str, str, None] | None" = None,  # type: ignore[reportInvalidTypeArguments]
     lat: "slice[float, float, None] | None" = None,  # type: ignore[reportInvalidTypeArguments]
     lon: "slice[float, float, None] | None" = None,  # type: ignore[reportInvalidTypeArguments]
-) -> "xr.DataArray":
+) -> xr.DataArray:
     """Filter a (time, lat, lon) DataArray by slicing along given dims.
 
     Use this function instead of data_array.sel() wherever possible. To filter
@@ -74,7 +134,8 @@ def filter_data_array(
     Args:
         data_array: The DataArray to slice.
         time: Slice to apply to the time dim. Start and stop must be date
-            strings of the form "YYYY-MM-DD". Defaults to None (no slicing).
+            strings of the form "YYYY-MM-DD" or ISO 8601 datetimes.
+            Defaults to None (no slicing).
         lat: Slice to apply to the lat dim. Start and stop must be floats in
             the range [-90, 90]. Defaults to None (no slicing).
         lon: Slice to apply to the lon dim. Start and stop must be floats in
@@ -88,10 +149,10 @@ def filter_data_array(
     return data_array.sel(indexers)  # type: ignore[reportUnknownMemberType]
 
 
-def max_coords(
-    data_array: "xr.DataArray",
-) -> dict[str, str | float]:
+def max_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     """Return the coords, along each dim, of the maximum value in data_array.
+
+    Also returns the actual value at the point.
 
     Args:
         data_array: The DataArray to apply the operation to.
@@ -102,9 +163,10 @@ def max_coords(
 
     Sample output:
     {
-        'time': '2024-10-01',
+        'time': '2024-10-01T12:00:00.000000000',
         'lat': 20.675352,
-        'lon': -90.825652
+        'lon': -90.825652,
+        'value': 35.2
     }
     """
     tmp: dict[str, xr.DataArray] = data_array.argmax(dim=...)  # type: ignore[reportAssignmentType]
@@ -113,17 +175,17 @@ def max_coords(
         k: compute(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
         for k, v in tmp.items()
     }
-    out["time"] = str(np.datetime_as_string(out["time"], unit="D"))  # type: ignore[reportArgumentType]
+    out["time"] = str(np.datetime_as_string(out["time"]))  # type: ignore[reportArgumentType]
     out["lat"] = round(out["lat"].item(), 6)  # type: ignore[reportArgumentType]
     out["lon"] = round(out["lon"].item(), 6)  # type: ignore[reportArgumentType]
-
+    out["value"] = compute(data_array.max()).values.item()  # type: ignore[reportMemberType]
     return out  # type: ignore[reportUnknownVariableType]
 
 
-def min_coords(
-    data_array: "xr.DataArray",
-) -> dict[str, str | float]:
+def min_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     """Return the coords, along each dim, of the minimum value in data_array.
+
+    Also returns the actual value at the point.
 
     Args:
         data_array: The DataArray to apply the operation to.
@@ -134,9 +196,10 @@ def min_coords(
 
     Sample output:
     {
-        'time': '2024-10-01',
+        'time': '2024-10-01T12:00:00.000000000',
         'lat': 20.675352,
-        'lon': -90.825652
+        'lon': -90.825652,
+        'value': 4.7
     }
     """
     tmp: dict[str, xr.DataArray] = data_array.argmin(dim=...)  # type: ignore[reportAssignmentType]
@@ -145,9 +208,10 @@ def min_coords(
         k: compute(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
         for k, v in tmp.items()
     }
-    out["time"] = str(np.datetime_as_string(out["time"], unit="D"))  # type: ignore[reportArgumentType]
+    out["time"] = str(np.datetime_as_string(out["time"]))  # type: ignore[reportArgumentType]
     out["lat"] = round(out["lat"].item(), 6)  # type: ignore[reportArgumentType]
     out["lon"] = round(out["lon"].item(), 6)  # type: ignore[reportArgumentType]
+    out["value"] = compute(data_array.min()).values.item()  # type: ignore[reportMemberType]
     return out  # type: ignore[reportUnknownVariableType]
 
 
@@ -172,7 +236,7 @@ def geocode_natural_language_description(text: str) -> "BaseGeometry":
 
 def polygon_to_mask(
     polygon: "Polygon",
-    data_array: "xr.DataArray",
+    data_array: xr.DataArray,
 ) -> npt.NDArray[np.bool_]:
     """Create spatial mask from polygon for (time, lat, lon) data_array.
 
@@ -209,11 +273,11 @@ def polygon_to_mask(
 
 
 def mask_data_array_with_polygon(
-    data_array: "xr.DataArray",
+    data_array: xr.DataArray,
     polygon: "Polygon",
     *,
     crop: bool = False,
-) -> "xr.DataArray":
+) -> xr.DataArray:
     """Mask out data_array with polygon, optionally cropping to polygon bounds.
 
     Equivalent to converting the polygon to a binary mask and then calling

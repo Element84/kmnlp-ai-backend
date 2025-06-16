@@ -1,0 +1,2 @@
+class TestVariable:
+    pass

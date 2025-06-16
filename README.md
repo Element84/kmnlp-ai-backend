@@ -17,3 +17,11 @@ LLM-related code.
 1. Verify linting passes `scripts/lint.sh`.
 1. Verify tests pass `scripts/test.sh`.
 1. Commit and push your changes.
+
+## Run evaluations
+
+Run pre-defined experiments to evaluate LLM-components and output detailed evaluation reports:
+
+```sh
+python evals/run_evals.py
+```

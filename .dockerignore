@@ -1,0 +1,90 @@
+# Cargo culted
+**/.git
+**/.gitignore
+**/.vscode
+**/coverage
+**/.env
+**/.aws
+**/.ssh
+Dockerfile
+README.md
+docker-compose.yml
+**/.DS_Store
+**/venv
+**/env
+
+# Added
+**/__pycache__
+**/.venv
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+__pypackages__/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# directory created by VS Code "local history" extension
+.history/
+
+# outputs from run_eval.py
+evals/outputs/
+
+# Mise
+mise.toml
+
+# Archives and the like
+**/*.tar
+**/*.tgz
+**/*.tar.gz
+**/*.zip
+
+# Caches
+.pytest_cache
+.ruff_cache
+
+# Precommit config
+.pre-commit-config.yaml
+
+# Notebooks
+notebooks

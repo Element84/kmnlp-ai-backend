@@ -28,6 +28,7 @@ from llm_agent.agents.scientific_python_agent.utils.misc import (
     get_function_def,
     parse_code_solution,
 )
+from llm_agent.utils import get_current_date
 
 log = logging.getLogger(__name__)
 
@@ -45,15 +46,13 @@ DEFAULT_UTILS = [
 
 PYTHON_VERSION = 3.12
 
-SCIENTIFIC_PYTHON_SYSTEM_PROMPT = """
+SCIENTIFIC_PYTHON_SYSTEM_PROMPT_TEMPLATE = Template("""\
 You are an LLM specializing in writing scientific Python code to extract \
 insights from N-dimensional data using libraries such as xarray.
-"""
 
-SCIENTIFIC_PYTHON_PROMPT_TEMPLATE = Template(f"""\
-Write Python code to fulfill the request given below.
+The current date is: ${current_date}.
 
-The code you write will be executed in a Python {PYTHON_VERSION} environment \
+The code you write will be executed in a Python ${python_version} environment \
 where the code below, inside `<setup-code></setup-code>` tags, has already \
 been executed and its output is provided below inside \
 `<setup-output></setup-output>` tags. Assume that your \
@@ -88,28 +87,32 @@ provided `compute()` util function instead.
 array.
 - Remember to call `compute()` before using a `DataArray` for plots.
 - Always use `plt.show()` to display plots. Never save them to file.
-- If printing out an answer in your code, prefix each line with "$ANSWER$". \
-E.g. `print("$ANSWER$", "The max SST on Jan 01, 2023 was ...")`. This only \
+- If printing out an answer in your code, prefix each line with "$$ANSWER$$". \
+E.g. `print("$$ANSWER$$", "The max SST on Jan 01, 2023 was ...")`. This only \
 applies to `<code></code>` blocks.
 
 <setup-code>
 ```python
-${{setup_code}}
+${setup_code}
 ```
 </setup-code>
 
 <setup-output>
-${{setup_output}}
+${setup_output}
 </setup-output>
 
 <utils>
 ```python
-${{utils}}
+${utils}
 ```
 </utils>
+""")
+
+SCIENTIFIC_PYTHON_PROMPT_TEMPLATE = Template("""\
+Write Python code to fulfill the request given below.
 
 <request>
-${{query}}
+${query}
 </request>
 """)
 
@@ -140,28 +143,44 @@ class ScientificPythonAgent(Agent):
         """
         self.llm = llm
         self.tools = []
+        self.setup_code = setup_code
+        self.setup_output = str(setup_output)
+        utils_str = "\n\n".join(get_function_def(func) for func in self.utils)
+        self.system_prompt = (
+            SCIENTIFIC_PYTHON_SYSTEM_PROMPT_TEMPLATE.substitute(
+                python_version=PYTHON_VERSION,
+                setup_code=self.setup_code,
+                setup_output=self.setup_output,
+                utils=utils_str,
+                current_date=get_current_date(),
+            )
+        )
+        self._prompt_template = SCIENTIFIC_PYTHON_PROMPT_TEMPLATE
+        if inference_cfg is not None:
+            if inference_cfg.system_prompt is not None:
+                msg = (
+                    "system_prompt should not be set in the provided "
+                    "LLMInferenceConfig"
+                )
+                raise ValueError(msg)
+            inference_cfg = inference_cfg.model_copy(
+                update={
+                    "system_prompt": self.system_prompt,
+                    "json_mode": True,
+                }
+            )
         if inference_cfg is None:
             inference_cfg = LLMInferenceConfig(
-                system_prompt=SCIENTIFIC_PYTHON_SYSTEM_PROMPT,
+                system_prompt=self.system_prompt,
                 temperature=0,
                 json_mode=True,
                 max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
             )
         self.inference_cfg = inference_cfg
-        self.setup_code = setup_code
-        self.setup_output = str(setup_output)
-        utils_str = "\n\n".join(get_function_def(func) for func in self.utils)
-        self._prompt_template: Template = Template(
-            SCIENTIFIC_PYTHON_PROMPT_TEMPLATE.safe_substitute(
-                setup_code=self.setup_code,
-                setup_output=self.setup_output,
-                utils=utils_str,
-            )
-        )
 
     def run(self, query: str) -> LLMCodeSolution:
         """Translate query into Python code."""
-        prompt = self._prompt_template.safe_substitute(query=query)
+        prompt = self._prompt_template.substitute(query=query)
         response = self.llm.prompt(
             messages=[LLMMessage(role="user", content=prompt)],
             inference_cfg=self.inference_cfg,

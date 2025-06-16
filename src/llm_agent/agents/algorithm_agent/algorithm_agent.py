@@ -3,12 +3,14 @@ import logging
 from string import Template
 from typing import Generic, TypeVar
 
+from anyio import to_thread
 from e84_geoai_common.llm.core import (
     LLM,
     Agent,
     LLMInferenceConfig,
     LLMMessage,
 )
+from pydantic import ValidationError
 from rich.pretty import pretty_repr
 
 from llm_agent.agents.algorithm_agent.interface import (
@@ -16,15 +18,16 @@ from llm_agent.agents.algorithm_agent.interface import (
     ProblemSpec,
     SolutionSpec,
 )
+from llm_agent.utils import EnrichedValidationError, get_current_date
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_OUTPUT_TOKENS = 10_000
 
 
-ALGORITHM_AGENT_SYSTEM_PROMPT = Template("""\
+ALGORITHM_AGENT_SYSTEM_PROMPT_TEMPLATE = Template("""\
 You are an LLM specializing in designing algorithms to solve problems and \
-describing them using the given specifications and contraints.
+describing them using the given specifications and constraints.
 
 The problems to solve will be specified using this schema:
 <problem_schema>
@@ -39,6 +42,8 @@ You must produce a JSON response satisfying this schema:
 ${solution_schema}
 ```
 </solution_schema>
+
+The current date is: ${current_date}.
 """)
 
 ALGORITHM_AGENT_PROMPT_TEMPLATE = Template("""\
@@ -82,17 +87,16 @@ class AlgorithmAgent(Agent, Generic[ProblemSpecType, SolutionSpecType]):
         self.tools = []
         self.problem_spec = problem_spec
         self.solution_spec = solution_spec
-        self.system_prompt = ALGORITHM_AGENT_SYSTEM_PROMPT.safe_substitute(
+        self.system_prompt = ALGORITHM_AGENT_SYSTEM_PROMPT_TEMPLATE.substitute(
             problem_schema=pretty_repr(
                 self.problem_spec.model_json_schema(), indent_size=2
             ),
             solution_schema=pretty_repr(
                 self.solution_spec.model_json_schema(), indent_size=2
             ),
+            current_date=get_current_date(),
         )
-        self._prompt_template: Template = Template(
-            ALGORITHM_AGENT_PROMPT_TEMPLATE.safe_substitute()
-        )
+        self._prompt_template = ALGORITHM_AGENT_PROMPT_TEMPLATE
         if inference_cfg is not None:
             if inference_cfg.system_prompt is not None:
                 msg = (
@@ -115,22 +119,26 @@ class AlgorithmAgent(Agent, Generic[ProblemSpecType, SolutionSpecType]):
             )
         self.inference_cfg = inference_cfg
 
-    def run(self, problem: ProblemSpecType) -> SolutionSpecType:
+    async def run(self, problem: ProblemSpecType) -> SolutionSpecType:
         """Construct an algorithm to solve the given problem."""
-        prompt = self._prompt_template.safe_substitute(
+        prompt = self._prompt_template.substitute(
             problem_spec=pretty_repr(problem.model_dump(), indent_size=2)
         )
-        response = self.llm.prompt(
-            messages=[LLMMessage(role="user", content=prompt)],
-            inference_cfg=self.inference_cfg,
+        response = await to_thread.run_sync(
+            self.llm.prompt,
+            [LLMMessage(role="user", content=prompt)],
+            self.inference_cfg,
         )
         text = response.to_text_only()
+        # HACK to fix accidental use of triple quotes in JSON by the LLM.
+        text = text.replace('"""', '"')
+        text = text.replace("'''", '"')
+        # strict=False to handle newlines in string fields.
+        solution_json = json.loads(text, strict=False)
         try:
-            solution_json = json.loads(text, strict=False)
-        except json.JSONDecodeError:
-            log.info(text)
-            raise
-        solution = self.solution_spec.model_validate(solution_json)
+            solution = self.solution_spec.model_validate(solution_json)
+        except ValidationError as e:
+            raise EnrichedValidationError(e, data=solution_json) from None
         return solution
 
     @property

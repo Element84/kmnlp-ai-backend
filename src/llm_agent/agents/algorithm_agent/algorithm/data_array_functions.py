@@ -34,9 +34,9 @@ class FilterDataArray(Function):
     )
     time_range: tuple[str, str] | None = Field(
         default=None,
-        description="Slice to apply to the time dim. "
-        "Start and stop must be date strings of the form 'YYYY-MM-DD'. "
-        "Defaults to None (no slicing).",
+        description="Slice to apply to the time dim. Start and stop are "
+        "inclusive and must be date strings of the form 'YYYY-MM-DD' or "
+        "ISO 8601 datetimes. Defaults to None (no slicing).",
     )
     lat_range: tuple[float, float] | None = Field(
         default=None,
@@ -93,36 +93,37 @@ class GroupByTimeAndReduceDataArray(Function):
     )
     op: Literal["sum", "mean", "std", "min", "max"]
     time_unit: Literal[
-        "time_dim",
-        "year",
-        "quarter",
-        "month",
+        "day",
         "week",
+        "month",
+        "quarter",
+        "year",
+        "dayofweek",
         "dayofmonth",
         "dayofyear",
-        "dayofweek",
-    ] = Field(
-        description="If 'time_dim', the DataArray will be grouped using the "
-        "existing time dimension. For others, the output 1D DataArray's "
-        "single dim will not be called 'time' and will not have the same "
-        "coords as the input DataArray.",
-    )
+    ] = Field(description="Time unit to group by.")
 
 
 class PointCoords(BaseModel):
-    """Coordinates of a single spatio-temporal point."""
+    """Coordinates of a single spatio-temporal point as scalar values.
+
+    Also includes the value at that point.
+    """
 
     time: str
     lat: float
     lon: float
+    value: float = Field(
+        description="Value at the point represented by the coords."
+    )
 
 
-class SelectPointCoordsDim(Function):
-    """Select an individual value from a PointCoords object."""
+class SelectPointCoordsKey(Function):
+    """Select an individual value from a PointCoords object, as a scalar."""
 
-    func_name: Literal["SelectPointCoordsDim"]
+    func_name: Literal["SelectPointCoordsKey"]
     point_coords: VariableReference
-    dim: Literal["time", "lat", "lon"]
+    key: Literal["time", "lat", "lon", "value"]
 
     @classmethod
     def model_json_schema(  # type:ignore[reportIncompatibleMethodOverride]
@@ -150,10 +151,10 @@ class DataArrayArgminCoords(Function):
     data_array: VariableReference
 
 
-class DataArrayToScalar(Function):
+class ZeroDimDataArrayToScalar(Function):
     """Convert a 0-dim DataArray to a scalar (int or float)."""
 
-    func_name: Literal["DataArrayToScalar"]
+    func_name: Literal["ZeroDimDataArrayToScalar"]
     data_array: VariableReference = Field(
         description="A (time, lat, lon) DataArray."
     )
@@ -207,6 +208,13 @@ class PlotDataArraysAsTimeSeries(Function):
         description="DataArrays to plot. If the size of the time dimension is "
         "greater than 1, only the first time step will be plotted.",
     )
+    labels: list[str] = Field(description="Legend labels for the data_arrays.")
+    force_overlaid: bool = Field(
+        default=False,
+        description="If the time series are for non-overlapping intervals "
+        "but you still want to overlay them for comparison. "
+        "Defaults to False.",
+    )
     title: str = Field("", description="Plot title.")
 
 
@@ -215,12 +223,12 @@ DataArrayFunctionSet = (
     | BinaryOperation
     | DataArrayArgmaxCoords
     | DataArrayArgminCoords
-    | DataArrayToScalar
+    | ZeroDimDataArrayToScalar
     | FilterDataArrayByPolygon
     | GeocodeNaturalLanguageDescription
     | GroupByTimeAndReduceDataArray
     | ReduceDataArray
-    | SelectPointCoordsDim
+    | SelectPointCoordsKey
     | PlotDataArraysAsTimeSeries
     | PlotDataArraysAsRaster
 )

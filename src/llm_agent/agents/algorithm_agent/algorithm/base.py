@@ -31,6 +31,12 @@ class FunctionCall(Expression, Generic[FunctionSet]):
     )
 
 
+class VariableReference(Expression):
+    """Reference to an already-defined variable."""
+
+    name: str = Field(description="Name of the variable.")
+
+
 class VariableAssignment(Expression, Generic[FunctionSet]):
     """Define a new variable."""
 
@@ -42,6 +48,7 @@ class VariableAssignment(Expression, Generic[FunctionSet]):
         | list[str]
         | list[int]
         | list[float]
+        | list[VariableReference]
         | FunctionCall[FunctionSet]
     ) = Field(
         description="Value to be assigned to the variable. "
@@ -53,14 +60,12 @@ class VariableAssignment(Expression, Generic[FunctionSet]):
     )
 
 
-class VariableReference(Expression):
-    """Reference to an already-defined variable."""
-
-    name: str = Field(description="Name of the variable.")
-
-
 class Algorithm(BaseModel, Generic[FunctionSet]):
-    """Representation of an algorithm."""
+    """Representation of an algorithm.
+
+    IMPORTANT: The output of each function call must be assigned to a variable.
+    Function calls CANNOT be composed.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

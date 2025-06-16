@@ -1,28 +1,28 @@
+image: docker:cli
+
+before_script:
+  # Runs the script and only prints the output if it fails.
+  - |
+    if ! output=$(scripts/gitlab_before_script.sh 2>&1); then
+      echo "Script failed with output:"
+      echo "$output"
+      exit 1
+    fi
+
 stages:
   - build
-  - lint
   - test
+  - integration_tests
 
 # Build the Docker image
 build_image:
   stage: build
-  image: docker:latest
   services:
     - docker:dind
   script:
-    - docker build -t llm-agent -f Dockerfile .
-  only:
-    - merge_requests
-    - main
-
-# Define a linting job
-lint:
-  stage: lint
-  image: docker:latest
-  services:
-    - docker:dind
-  script:
-    - docker run --rm llm-agent /opt/src/scripts/lint.sh
+    - scripts/build_image_ci.sh
+    - . scripts/assume_role_ci.sh
+    - scripts/push_image_ci.sh
   only:
     - merge_requests
     - main
@@ -30,11 +30,42 @@ lint:
 # Define a unit test job
 unit_tests:
   stage: test
-  image: docker:latest
   services:
     - docker:dind
   script:
-    - docker run --rm llm-agent /opt/src/scripts/test.sh
+    - . scripts/image_name.sh
+    - . scripts/assume_role_ci.sh
+    - scripts/pull_image_ci.sh
+    - docker run -e AWS_DEFAULT_REGION=$AWS_REGION --rm $ECR_TAG /opt/src/scripts/test.sh
+  only:
+    - merge_requests
+    - main
+
+# Define a linting job
+lint:
+  stage: test
+  services:
+    - docker:dind
+  script:
+    - . scripts/image_name.sh
+    - . scripts/assume_role_ci.sh
+    - scripts/pull_image_ci.sh
+    - docker run --rm $ECR_TAG /opt/src/scripts/lint-ci.sh
+  only:
+    - merge_requests
+    - main
+
+# Define an integration test job
+integration_tests:
+  stage: integration_tests
+  services:
+    - docker:dind
+  script:
+    # Start by running the before script to install the AWS CLI
+    - . scripts/image_name.sh
+    - . scripts/assume_role_ci.sh
+    - scripts/pull_image_ci.sh
+    - docker run -e AWS_DEFAULT_REGION=$AWS_REGION -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN --rm $ECR_TAG /opt/src/scripts/integration_tests.sh
   only:
     - merge_requests
     - main

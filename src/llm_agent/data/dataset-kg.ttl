@@ -1,0 +1,518 @@
+@base <http://kmnlp-demo.noaa.gov/> .
+
+# Create prefixes for the referenced ontologies.
+# This allows us to not need to repeatedly type the URL roots.
+@prefix : <http://kmnlp-demo.noaa.gov/> .
+@prefix cf: <http://cfconventions.org/Data/cf-standard-names/current/build/cf-standard-name-table.xml#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix qb:  <http://purl.org/linked-data/cube#> .
+@prefix qudt:  <http://qudt.org/3.1.1/schema/qudt/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix time: <http://www.w3.org/2006/time#> .
+@prefix unit:  <http://qudt.org/3.1.1/vocab/unit/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Explanation of syntax:
+#   * Each record in the graph store is a subject-predicate-object triple.
+#       (Think subject-verb group-object from grammar class.)
+#   * A triple can be expressed like:
+#       `subject predicate object .`
+#   * Each "part of speech" must be a full Internationalized Resource Identifier (IRI).
+#       For IRI, think Universal Resource Identifier (URI) with more allowed characters.
+#   * Prefixes are used for legibility.
+#   * A convenience syntax is available when multiple statements in a row have the same subject.
+#       e.g.
+#           developer writes code .
+#           developer uses textEditor .
+#       can be re-written as
+#           developer writes code ;
+#              uses textEditor .
+
+#################
+# GCMD keywords #
+#################
+:gcmd_sea_surface_temperature a schema:DefinedTerm ;
+  schema:name "SEA SURFACE TEMPERATURE" ; # wait, some example chomp the > structure, others do not
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/bd24a9a9-7d52-4c29-b2a0-6cefd216ae78> ;
+  schema:termCode "bd24a9a9-7d52-4c29-b2a0-6cefd216ae78" .
+
+:gcmd_water_temperature a schema:DefinedTerm ;
+  schema:name "WATER TEMPERATURE" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/46206e8c-8def-406f-9e62-da4e74633a58> ;
+  schema:termCode "46206e8c-8def-406f-9e62-da4e74633a58" .
+
+:gcmd_thermal_infrared a schema:DefinedTerm ;
+  schema:name "THERMAL INFRARED" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/68c2baba-b9b9-41d4-89bf-07488728bc4f> ;
+  schema:termCode "68c2baba-b9b9-41d4-89bf-07488728bc4f" .
+
+:gcmd_surface_winds a schema:DefinedTerm ;
+schema:name "Surface Winds" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/fbc53539-ce4e-4e3e-bbd2-8270386616b4>;
+  schema:termCode "fbc53539-ce4e-4e3e-bbd2-8270386616b4" .
+
+:gcmd_ocean_heat_budget_evaporation a schema:DefinedTerm ;
+schema:name "Evaporation" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/881eea51-e32c-4174-a73f-d56c94122c2e>;
+  schema:termCode "881eea51-e32c-4174-a73f-d56c94122c2e" .
+
+:gcmd_heat_flux a schema:DefinedTerm ;
+schema:name "Heat Flux" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/ee2cb9eb-f960-4e23-9e7c-be64d44a64e7>;
+  schema:termCode "ee2cb9eb-f960-4e23-9e7c-be64d44a64e7" .
+
+:gcmd_air_temperature a schema:DefinedTerm ;
+schema:name "Air Temperature" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/f634ab55-de40-4d0b-93bc-691bf5408ccb>;
+  schema:termCode "f634ab55-de40-4d0b-93bc-691bf5408ccb" .
+
+:gcmd_boundary_layer_temperature a schema:DefinedTerm ;
+schema:name "Boundary Layer Temperature" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/e9c3b6ca-a534-4f3e-82de-b8b921e8f312>;
+  schema:termCode "e9c3b6ca-a534-4f3e-82de-b8b921e8f312" .
+
+:gcmd_skin_temperature a schema:DefinedTerm ;
+schema:name "Skin Temperature" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/25fcdcb7-efd2-4d2f-ba57-92bbcc7ba69a>;
+  schema:termCode "25fcdcb7-efd2-4d2f-ba57-92bbcc7ba69a" .
+
+:gcmd_surface_temperature a schema:DefinedTerm ;
+schema:name "Surface Temperature" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/5a7bb095-4d12-4232-bc75-b8e82197cb92>;
+  schema:termCode "5a7bb095-4d12-4232-bc75-b8e82197cb92" .
+
+:gcmd_water_processes_evaporation a schema:DefinedTerm ;
+schema:name "Evaporation" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/b68ab978-6db6-49ee-84e2-5f37b461a998>;
+  schema:termCode "b68ab978-6db6-49ee-84e2-5f37b461a998" .
+
+:gcmd_humidity a schema:DefinedTerm ;
+schema:name "Humidity" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/427e5121-a142-41cb-a8e9-a70b7f98eb6a>;
+  schema:termCode "427e5121-a142-41cb-a8e9-a70b7f98eb6a" .
+
+:gcmd_water_vapor a schema:DefinedTerm ;
+  schema:name "Water Vapor" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/15029eb0-6342-4066-8ac9-c50f7dbfb392>;
+  schema:termCode "15029eb0-6342-4066-8ac9-c50f7dbfb392" .
+
+:gcmd_precipitation_amount a schema:DefinedTerm ;
+  schema:name "Precipitation Amount" ;
+  schema:inDefinedTermSet <https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords> ;
+  schema:url <https://gcmd.earthdata.nasa.gov/kms/concept/cad5c02a-e771-434e-bef6-8dced38a68e8>;
+  schema:termCode "cad5c02a-e771-434e-bef6-8dced38a68e8" .
+
+###################################################
+# GCOS Essential Climate Variables (ECV) keywords #
+###################################################
+:ecv_sea_surface_temperature a schema:DefinedTerm ;
+  schema:name "Sea Surface Temperature" ;
+  schema:inDefinedTermSet <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables> ;
+  schema:url <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables/sea-surface-temperature> ;
+  schema:termCode "sea-surface-temperature" .
+
+:ecv_air_temperature a schema:DefinedTerm ;
+  schema:name "Surface Temperature" ;
+  schema:inDefinedTermSet <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables> ;
+  schema:url <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables/surface-temperature> ;
+  schema:termCode "surface-temperature" .
+
+:ecv_wind_speed_and_direction a schema:DefinedTerm ;
+  schema:name "Surface Wind Speed and Direction" ;
+  schema:inDefinedTermSet <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables> ;
+  schema:url <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables/surface-wind-speed-and-direction> ;
+  schema:termCode "surface-wind-speed-and-direction" .
+
+:ecv_water_vapour a schema:DefinedTerm ;
+  schema:name "Surface Water Vapour" ;
+  schema:inDefinedTermSet <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables> ;
+  schema:url <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables/surface-water-vapour> ;
+  schema:termCode "surface-water-vapour" .
+
+:ecv_precipitation a schema:DefinedTerm ;
+  schema:name "Surface Precipitation" ;
+  schema:inDefinedTermSet <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables> ;
+  schema:url <https://gcos.wmo.int/site/global-climate-observing-system-gcos/essential-climate-variables/precipitation> ;
+  schema:termCode "precipitation" .
+
+#####################
+# Common Dimensions #
+#####################
+:lat a schema:PropertyValue, qb:DimensionProperty ;
+  schema:name "lat" ;
+  schema:alternateName "latitude" ;
+  schema:unitText "decimal degree" ;
+  schema:propertyID qb:measureDimension ;
+
+  rdfs:label "latitude" ;
+  cf:standard_name "latitude" ;
+  qudt:hasUnit unit:DEG .
+
+:lon a schema:PropertyValue, qb:DimensionProperty ;
+  schema:name "lon" ;
+  schema:alternateName "longitude" ;
+  schema:unitText "decimal degree" ;
+  schema:propertyID qb:measureDimension ;
+
+  rdfs:label "longitude" ;
+  cf:standard_name "longitude" ;
+  qudt:hasUnit unit:DEG .
+
+:time a schema:PropertyValue, qb:DimensionProperty ;
+  schema:name "time" ;
+  schema:alternateName "datetime" ;
+  schema:propertyID qb:measureDimension ;
+
+  rdfs:label "time" ;
+  cf:standard_name "time" .
+
+##################################
+# Properties for CRW SST dataset #
+##################################
+:CRWSSTDataset a dcat:Dataset, schema:Dataset, qb:DataSet ;
+  schema:name "NOAA Coral Reef Watch Daily Global 5km Satellite Sea Surface Temperature (CoralTemp)" ;
+  schema:description "This product is designed to improve on and replace the use of AVHRR Pathfinder SST for use within the Coral Reef Watch Program." ;
+  schema:contentURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/crw/5km/v3.1/nc/v1.0/daily/sst/zarr_reference.json> ;
+  schema:sameAs <https://coralreefwatch.noaa.gov/product/5km/index_5km_sst.php> ;
+  schema:version "3.1" ;
+  schema:isAccessibleForFree true ;
+  schema:keywords :gcmd_sea_surface_temperature, :gcmd_water_temperature, :gcmd_thermal_infrared ;
+  schema:variableMeasured :lat ;
+  schema:variableMeasured :lon ;
+  schema:variableMeasured :time ;
+  schema:variableMeasured :analysed_sst ;
+  schema:variableMeasured :sea_ice_fraction ;
+
+  dcterms:title "NOAA Coral Reef Watch Daily Global 5km Satellite Sea Surface Temperature (CoralTemp)" ;
+  dcterms:description "This product is designed to improve on and replace the use of AVHRR Pathfinder SST for use within the Coral Reef Watch Program." ;
+
+  qb:structure :dsd_analysed_sst, :dsd_sea_ice_fraction ;
+
+  rdfs:label "NOAA Coral Reef Watch Daily Global 5km Satellite Sea Surface Temperature (CoralTemp)" ;
+  rdfs:comment "This product is designed to improve on and replace the use of AVHRR Pathfinder SST for use within the Coral Reef Watch Program." ;
+
+  dcat:distribution
+    [a dcat:Distribution ;
+    dcat:accessURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/crw/5km/v3.1/nc/v1.0/daily/sst/zarr_reference.json> ;
+    dcat:mediaType "application/zarr"] ;
+
+  dcat:temporalResolution "P1D"^^xsd:duration ;
+  dcat:startDate "2020-01-01T00:00:00Z"^^xsd:dateTime ;
+  dcat:endDate "2024-11-30T12:00:00Z"^^xsd:dateTime .
+
+# Variables
+:analysed_sst a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "analysed sea surface temperature" ; # copied from long_name
+  schema:name "analysed_sst" ; # the name of the column
+  schema:alternateName "sea_surface_temperature" ; # copied from standard_name
+  schema:unitText "degrees_Celsius" ; # copied from units
+  schema:propertyID qb:measure ;
+
+  rdfs:label "analysed_sst" ;
+
+  cf:standard_name "sea_surface_temperature" ;
+  cf:long_name "analysed sea surface temperature" ;
+
+  qudt:hasUnit unit:DEG_C .
+
+:dsd_analysed_sst a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :analysed_sst] .
+
+:sea_ice_fraction a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "Sea Ice Fraction" ; # copied from long_name
+  schema:name "sea_ice_fraction" ; # the name of the column
+  schema:alternateName "sea_ice_area_fraction" ; # copied from standard_name
+  schema:unitText "1" ; # copied from units
+  schema:propertyID qb:measure ;
+
+  rdfs:label "sea_ice_fraction" ;
+  rdfs:comment "0 is 0% ice, 1 is 100% ice" ;
+
+  cf:standard_name "sea_ice_area_fraction" ;
+  cf:long_name "Sea Ice Fraction" ;
+
+  qudt:hasUnit unit:UNITLESS .
+
+:dsd_sea_ice_fraction a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :sea_ice_fraction] .
+
+###################################################
+# Properties for Climate Data Record Atmo dataset #
+###################################################
+:CDRAtmoDataset a dcat:Dataset, schema:Dataset, qb:DataSet;
+  schema:name "NOAA Climate Data Record of Ocean Near-Surface Properties" ;
+  schema:description "This dataset provides a high quality Climate Data Record (CDR) of ocean near-surface properties that can be used for any analysis of the latent and sensible heat fluxes and the associated surface parameters from synoptic scale through climate variability." ;
+  schema:contentURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/noaa-cdr-ocean-nearsurface-atmos-profiles-pds/daily/zarr_reference_final.json> ;
+  schema:sameAs <https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=gov.noaa.ncdc:C00974> ;
+  schema:version "2" ;
+  schema:isAccessibleForFree true ;
+  schema:keywords :gcmd_surface_winds, :gcmd_ocean_heat_budget_evaporation, :gmcd_heat_flux, :gcmd_sea_surface_temperature, :gcmd_air_temperature, :gcmd_boundary_layer_temperature, :gcmd_skin_temperature, :gcmd_surface_temperature, :gcmd_water_processes_evaporation, :gcmd_humidity, :gcmd_water_vapor, :ecv_sea_surface_temperature, :ecv_air_temperature, :ecv_wind_speed_and_direction, :ecv_water_vapour ;
+  schema:identifier "doi:10.7289/V55T3HH0" ;
+
+  schema:variableMeasured :lat ;
+  schema:variableMeasured :lon ;
+  schema:variableMeasured :time ;
+  schema:variableMeasured :air_temperature ;
+  schema:variableMeasured :specific_humidity ;
+  schema:variableMeasured :wind_speed ;
+  schema:variableMeasured :cdr_atmo_fill_missing_qc ;
+
+  dcterms:title "NOAA Climate Data Record of Ocean Near-Surface Properties" ;
+  dcterms:description "This dataset provides a high quality Climate Data Record (CDR) of ocean near-surface properties that can be used for any analysis of the latent and sensible heat fluxes and the associated surface parameters from synoptic scale through climate variability." ;
+  qb:structure :dsd_air_temperature, :dsd_specific_humidity, :dsd_wind_speed, :dsd_cdr_atmo_fill_missing_qc ;
+
+  rdfs:label "NOAA Climate Data Record of Ocean Near-Surface Properties" ;
+  rdfs:comment "This dataset provides a high quality Climate Data Record (CDR) of ocean near-surface properties that can be used for any analysis of the latent and sensible heat fluxes and the associated surface parameters from synoptic scale through climate variability." ;
+
+  dcat:distribution
+    [a dcat:Distribution ;
+    dcat:accessURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/noaa-cdr-ocean-nearsurface-atmos-profiles-pds/daily/zarr_reference_final.json> ;
+    dcat:mediaType "application/zarr"] ;
+
+  dcat:temporalResolution "PT3H"^^xsd:duration ;
+  dcat:startDate "1988-01-01T01:30:00Z"^^xsd:dateTime ;
+  dcat:endDate "2021-08-31T22:30:00Z"^^xsd:dateTime .
+
+# Variables
+:air_temperature a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "NOAA CDR of near-surface air temperature" ; # copied from long_name
+  schema:name "air_temperature" ; # the name of the column
+  schema:alternateName "air_temperature" ; # copied from standard_name
+  schema:unitText "degree_Celsius" ; # copied from units
+  schema:propertyID qb:measure ;
+
+  rdfs:label "air_temperature" ;
+
+  qudt:hasUnit unit:DEG_C .
+
+:dsd_air_temperature a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :air_temperature] .
+
+:specific_humidity a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "NOAA FCDR of near-surface specific humidity" ; # copied from long_name
+  schema:name "specific_humidity" ; # the name of the column
+  schema:alternateName "specific_humidity" ; # copied from standard_name
+  schema:unitText "g kg-1" ; # copied from units
+  schema:propertyID qb:measure ;
+
+  rdfs:label "specific_humidity" ;
+
+  qudt:hasUnit unit:GM-PER-KiloGM .
+
+:dsd_specific_humidity a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :specific_humidity] .
+
+:wind_speed a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "NOAA FCDR of near-surface wind speed" ; # copied from long_name
+  schema:name "wind_speed" ; # the name of the column
+  schema:alternateName "wind_speed" ; # copied from standard_name
+  schema:unitText "m s-1" ; # copied from units
+  schema:propertyID qb:measure ;
+
+  rdfs:label "wind_speed" ;
+
+  qudt:hasUnit unit:M-PER-SEC .
+
+:dsd_wind_speed a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :wind_speed] .
+
+:cdr_atmo_fill_missing_qc a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "Quality flag for missing data" ; # copied from long_name
+  schema:name "fill_missing_qc" ; # the name of the column
+  schema:alternateName "The reason values are missing" ;
+  schema:propertyID qb:measure ;
+
+  rdfs:label "fill_missing_qc" ;
+  rdfs:comment "0=observation, 1=model-based interpolation, 2=snow or ice contamination, 3=over land, 4=over lake, 5=interpolation failed" ;
+
+  qudt:hasUnit unit:UNITLESS .
+
+:dsd_cdr_atmo_fill_missing_qc a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :cdr_atmo_fill_missing_qc] .
+
+############################################
+# Properties for Oceanic Heat Flux dataset #
+############################################
+:CDRHeatfluxDataset a dcat:Dataset, schema:Dataset, qb:DataSet;
+  schema:name "NOAA Climate Data Record of Ocean Heat Fluxes" ;
+  schema:description "SeaFlux Ocean Surface Bundle (OSB) Climate Data Record (CDR) of Ocean Heat Fluxes" ;
+  schema:contentURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/noaa-cdr-ocean-heatflux-pds/daily/zarr_reference_final.json> ;
+  schema:sameAs <https://www.ncei.noaa.gov/products/climate-data-records/ocean-heat-fluxes> ;
+  schema:version "2" ;
+  schema:isAccessibleForFree true ;
+  schema:keywords :gcmd_surface_winds, :gcmd_ocean_heat_budget_evaporation, :gcmd_heat_flux, :gcmd_sea_surface_temperature, :gcmd_air_temperature, :gcmd_boundary_layer_temperature, :gcmd_skin_temperature, :gcmd_surface_temperature, :gcmd_water_processes_evaporation, :gcmd_humidity, :gcmd_water_vapor, :ecv_sea_surface_temperature, :ecv_air_temperature, :ecv_wind_speed_and_direction, :ecv_water_vapour ;
+  schema:identifier "doi:10.7289/V59K4885" ;
+
+  schema:variableMeasured :lat ;
+  schema:variableMeasured :lon ;
+  schema:variableMeasured :time ;
+  schema:variableMeasured :surface_upward_sensible_heat_flux ;
+  schema:variableMeasured :surface_upward_latent_heat_flux ;
+  schema:variableMeasured :cdr_heatflux_fill_missing_qc ;
+
+  dcterms:title "NOAA Climate Data Record of Ocean Heat Fluxes" ;
+  dcterms:description "SeaFlux Ocean Surface Bundle (OSB) Climate Data Record (CDR) of Ocean Heat Fluxes" ;
+  rdfs:label "NOAA Climate Data Record of Ocean Heat Fluxes" ;
+
+  rdfs:label "NOAA Climate Data Record of Ocean Heat Fluxes" ;
+  rdfs:comment "SeaFlux Ocean Surface Bundle (OSB) Climate Data Record (CDR) of Ocean Heat Fluxes" ;
+
+  qb:structure :dsd_surface_upward_sensible_heat_flux, :dsd_surface_upward_latent_heat_flux, :dsd_surface_upward_latent_heat_flux ;
+
+  dcat:distribution
+    [a dcat:Distribution ;
+    dcat:accessURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/noaa-cdr-ocean-heatflux-pds/daily/zarr_reference_final.json> ;
+    dcat:mediaType "application/zarr"] ;
+  dcat:temporalResolution "P1D"^^xsd:duration ;
+  dcat:startDate "1988-01-01T01:30:00Z"^^xsd:dateTime ;
+  dcat:endDate "2021-08-31T22:30:00Z"^^xsd:dateTime .
+
+# It probably makes sense to add classes for sensible and latent heat?
+:surface_upward_sensible_heat_flux a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "NOAA CDR of sensible heat flux" ;
+  schema:name "surface_upward_sensible_heat_flux" ;
+  schema:alternateName "surface_upward_sensible_heat_flux" ;
+  schema:unit_text "W m-2" ;
+  schema:propertyID qb:measure ;
+
+  rdfs:label "surface_upward_sensible_heat_flux" ;
+
+  qudt:hasUnit unit:W-PER-M2 .
+
+:dsd_surface_upward_sensible_heat_flux a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :surface_upward_sensible_heat_flux] .
+
+:surface_upward_latent_heat_flux a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "NOAA CDR of latent heat flux";
+  schema:name "surface_upward_latent_heat_flux" ;
+  schema:alternateName "surface_upward_latent_heat_flux" ;
+  schema:unit_text "W m-2" ;
+  schema:propertyID qb:measure ;
+
+  rdfs:label "surface_upward_latent_heat_flux" ;
+
+  qudt:hasUnit unit:W-PER-M2 .
+
+:dsd_surface_upward_latent_heat_flux a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :surface_upward_latent_heat_flux] .
+
+:cdr_heatflux_fill_missing_qc a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "Quality flag for missing data" ;
+  schema:name "fill_missing_qc" ;
+  schema:alternateName "cdr_heatflux_fill_missing_qc" ;
+  schema:propertyID qb:measure ;
+
+  rdfs:label "fill_missing_qc" ;
+  rdfs:comment "A custom variable indicating the reason for missing values.\n 0=observation, 1=unused, 2=snow or ice contamination, 3=over land, 4=over lake, 5=high wind speed, 6=fluxes unresolved" ;
+
+  qudt:hasUnit unit:UNITLESS .
+
+:dsd_cdr_heatflux_fill_missing_qc a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :cdr_heatflux_fill_missing_qc] .
+
+############################
+# Properites in CMORPH CDR #
+############################
+:CMORPHCDRDataset a dcat:Dataset, schema:Dataset, qb:DataSet ;
+  schema:name "NOAA Climate Data Record (CDR) of CPC Morphing Technique (CMORPH) High-Resolution Global Precipitation Estimates" ;
+  schema:description "The CMORPH CDR is a reprocessed and bias-corrected global precipitation product created on an 8kmx8km grid over the globe (60S-60N) and in a 30-minute temporal resolution for an 18-year period from January 1998 to the present. First, the purely satellite based CMORPH precipitation estimates (raw CMORPH) are reprocessed. The integration algorithm is fixed and the input Level 2 passive microwave (PMW) retrievals of instantaneous precipitation rates are from identical versions throughout the entire data period. Bias correction is then performed for the raw CMORPH through probability density function (PDF) matching against the CPC daily gauge analysis over land and through adjustment against the Global Precipitation Climatology Program (GPCP) pentad merged analysis of precipitation over ocean. The reprocessed, bias-corrected CMORPH exhibits improved performance in representing the magnitude, spatial distribution patterns and temporal variations of precipitation over the global domain from 60S to 60N. Bias in the CMORPH satellite precipitation estimates is almost completely removed over land during warm seasons (May – September), while during co seasons (October - April) CMORPH tends to under-estimate the precipitation due to the less-than-desirable performance of the current generation PMW retrievals in detecting and quantifying snowfall and cold season rainfall. Details of the CMORPH CDR may be found in Xie et al. (2017)." ;
+  schema:contentURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/noaa-cdr-precip-cmorph-pds/daily/zarr_reference_final.json> ;
+  schema:sameAs <https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=gov.noaa.ncdc:C00948> ;
+  schema:version "1" ;
+  schema:isAccessibleForFree true ;
+  schema:keywords :gcmd_precipitation_amount, :ecv_precipitation ;
+  schema:identifier "doi:10.25921/w9va-q159" ;
+
+  schema:variableMeasured :lat ;
+  schema:variableMeasured :lon ;
+  schema:variableMeasured :time ;
+  schema:variableMeasured :lwe_precipitation_rate ;
+
+  dcterms:title "NOAA Climate Data Record (CDR) of CPC Morphing Technique (CMORPH) High-Resolution Global Precipitation Estimates" ;
+  dcterms:description "The CMORPH CDR is a reprocessed and bias-corrected global precipitation product created on an 8kmx8km grid over the globe (60S-60N) and in a 30-minute temporal resolution for an 18-year period from January 1998 to the present. First, the purely satellite based CMORPH precipitation estimates (raw CMORPH) are reprocessed. The integration algorithm is fixed and the input Level 2 passive microwave (PMW) retrievals of instantaneous precipitation rates are from identical versions throughout the entire data period. Bias correction is then performed for the raw CMORPH through probability density function (PDF) matching against the CPC daily gauge analysis over land and through adjustment against the Global Precipitation Climatology Program (GPCP) pentad merged analysis of precipitation over ocean. The reprocessed, bias-corrected CMORPH exhibits improved performance in representing the magnitude, spatial distribution patterns and temporal variations of precipitation over the global domain from 60S to 60N. Bias in the CMORPH satellite precipitation estimates is almost completely removed over land during warm seasons (May – September), while during co seasons (October - April) CMORPH tends to under-estimate the precipitation due to the less-than-desirable performance of the current generation PMW retrievals in detecting and quantifying snowfall and cold season rainfall. Details of the CMORPH CDR may be found in Xie et al. (2017)." ;
+
+  qb:structure :dsd_lwe_precipitation_rate ;
+
+
+  rdfs:label "NOAA Climate Data Record (CDR) of CPC Morphing Technique (CMORPH) High-Resolution Global Precipitation Estimates" ;
+  rdfs:comment "The CMORPH CDR is a reprocessed and bias-corrected global precipitation product created on an 8kmx8km grid over the globe (60S-60N) and in a 30-minute temporal resolution for an 18-year period from January 1998 to the present. First, the purely satellite based CMORPH precipitation estimates (raw CMORPH) are reprocessed. The integration algorithm is fixed and the input Level 2 passive microwave (PMW) retrievals of instantaneous precipitation rates are from identical versions throughout the entire data period. Bias correction is then performed for the raw CMORPH through probability density function (PDF) matching against the CPC daily gauge analysis over land and through adjustment against the Global Precipitation Climatology Program (GPCP) pentad merged analysis of precipitation over ocean. The reprocessed, bias-corrected CMORPH exhibits improved performance in representing the magnitude, spatial distribution patterns and temporal variations of precipitation over the global domain from 60S to 60N. Bias in the CMORPH satellite precipitation estimates is almost completely removed over land during warm seasons (May – September), while during co seasons (October - April) CMORPH tends to under-estimate the precipitation due to the less-than-desirable performance of the current generation PMW retrievals in detecting and quantifying snowfall and cold season rainfall. Details of the CMORPH CDR may be found in Xie et al. (2017)." ;
+
+  dcat:distribution
+    [a dcat:Distribution ;
+    dcat:accessURL <s3://data-c6c22a2e42294c11b52ee7f0c792c071/noaa-cdr-precip-cmorph-pds/daily/zarr_reference_final.json> ;
+    dcat:mediaType "application/zarr"] ;
+  dcat:temporalResolution "P1D"^^xsd:duration ;
+  dcat:startDate "1988-01-01T01:30:00Z"^^xsd:dateTime ;
+  dcat:endDate "2021-08-31T22:30:00Z"^^xsd:dateTime .
+
+:lwe_precipitation_rate a schema:PropertyValue, qb:MeasureProperty ;
+  schema:description "NOAA Climate Data Record (CDR) of CPC Morphing Technique (CMORPH) High Resolution Global Precipitation Estimates";
+  schema:name "lwe_precipitation_rate" ;
+  schema:alternateName "cmorph" ;
+  schema:unitText "mm/day" ;
+  schema:propertyID qb:measure ;
+
+  rdfs:label "lwe_precipitation_rate" ;
+  rdfs:comment "!!! CMORPH estimate is rainrate !!!" ;
+
+  qudt:hasUnit unit:MilliM-PER-DAY .
+
+:dsd_specific_humidity a qb:DataStructureDefinition ;
+  qb:component
+    [qb:dimension :lat] ,
+    [qb:dimension :lon] ,
+    [qb:dimension :time] ,
+    [qb:measure :specific_humidity] .
