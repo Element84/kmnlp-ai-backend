@@ -242,7 +242,7 @@ class DatasetPickingAgent(Agent):
 
         default_inference_cfg = LLMInferenceConfig(
             temperature=0,
-            json_mode=True,
+            response_prefix="{",
             tools=list(self.tools.values()),
             max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
             system_prompt=DATASET_PICKING_AGENT_SYSTEM_PROMPT.substitute(
