@@ -2,12 +2,8 @@
 
 import os
 
-from llm_agent.dao.knowledge_graph_dao import KnowledgeGraphDAO
-from llm_agent.dao.util import KG_TTL_PATH
+from llm_agent.dao.utils import KG_TTL_PATHS
 
-__all__ = [
-    "KnowledgeGraphDAO",
-]
+__all__ = []
 
-kg_path = os.getenv("KG_PATH", KG_TTL_PATH)
-knowledge_graph_dao = KnowledgeGraphDAO(kg_path)
+kg_paths = _kg_paths.split(";") if (_kg_paths := os.getenv("KG_PATH")) else KG_TTL_PATHS

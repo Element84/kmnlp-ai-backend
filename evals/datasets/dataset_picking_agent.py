@@ -15,7 +15,7 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=True,
             tool_call_count=0,
             explanatory_content_count=1,
-            dataset_iris=[],
+            dataset_ids=[],
             has_datasets_in_multiple_responses=False,
         ),
     ),
@@ -26,7 +26,7 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=True,
             tool_call_count=0,
             explanatory_content_count=1,
-            dataset_iris=[],
+            dataset_ids=[],
             has_datasets_in_multiple_responses=False,
         ),
     ),
@@ -37,9 +37,9 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=False,
             tool_call_count=1,
             explanatory_content_count=2,
-            dataset_iris=[
-                "http://kmnlp-demo.noaa.gov/crw_daily_5km",
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-sea-surface-temp-whoi-pds_daily",
+            dataset_ids=[
+                "crw_daily_5km",
+                "noaa-cdr-sea-surface-temp-whoi-pds_daily",
             ],
             has_datasets_in_multiple_responses=False,
         ),
@@ -51,9 +51,9 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=False,
             tool_call_count=1,
             explanatory_content_count=2,
-            dataset_iris=[
-                "http://kmnlp-demo.noaa.gov/crw_daily_5km",
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-sea-surface-temp-whoi-pds_daily",
+            dataset_ids=[
+                "crw_daily_5km",
+                "noaa-cdr-sea-surface-temp-whoi-pds_daily",
             ],
             has_datasets_in_multiple_responses=False,
         ),
@@ -65,7 +65,7 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=False,
             tool_call_count=1,
             explanatory_content_count=2,
-            dataset_iris=["http://kmnlp-demo.noaa.gov/crw_daily_5km"],
+            dataset_ids=["crw_daily_5km"],
             has_datasets_in_multiple_responses=False,
         ),
     ),
@@ -76,9 +76,7 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=False,
             tool_call_count=1,
             explanatory_content_count=2,
-            dataset_iris=[
-                "http://kmnlp-demo.noaa.gov/air_temperature_noaa-cdr-ocean-nearsurface-atmos-profiles-pds_daily"
-            ],
+            dataset_ids=["air_temperature_noaa-cdr-ocean-nearsurface-atmos-profiles-pds_daily"],
             has_datasets_in_multiple_responses=False,
         ),
     ),
@@ -89,9 +87,7 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=False,
             tool_call_count=1,
             explanatory_content_count=2,
-            dataset_iris=[
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-ocean-heatflux-pds_daily"
-            ],
+            dataset_ids=["noaa-cdr-ocean-heatflux-pds_daily"],
             has_datasets_in_multiple_responses=False,
         ),
     ),
@@ -102,15 +98,19 @@ _dataset: list[DatasetPickingEvalInput] = [
             is_refusal=False,
             tool_call_count=1,
             explanatory_content_count=2,
-            dataset_iris=[
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-precip-cmorph-pds_daily",
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-precip-gpcp-daily-pds_daily",
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-precip-gpcp-monthly-pds_monthly",
-                "http://kmnlp-demo.noaa.gov/noaa-cdr-precip-persiann-pds_daily",
+            dataset_ids=[
+                "noaa-cdr-precip-cmorph-pds_daily",
+                "noaa-cdr-precip-gpcp-daily-pds_daily",
+                "noaa-cdr-precip-gpcp-monthly-pds_monthly",
+                "noaa-cdr-precip-persiann-pds_daily",
             ],
             has_datasets_in_multiple_responses=False,
         ),
     ),
 ]
 
-dataset = EvalDataset(items=[d.to_eval_input() for d in _dataset])
+dataset = EvalDataset(
+    id="default",
+    version="1",
+    items=[d.to_eval_input() for d in _dataset],
+)

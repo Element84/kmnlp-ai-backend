@@ -166,3 +166,7 @@ cython_debug/
 
 # outputs from run_eval.py
 evals/outputs/
+
+notebooks/**/data/
+
+temp/

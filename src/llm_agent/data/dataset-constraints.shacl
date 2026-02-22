@@ -1,0 +1,190 @@
+# SHACL resources:
+#   * https://www.w3.org/TR/shacl/
+#   * https://docs.brickschema.org/extra/custom-shapes.html
+#   * https://docs.cambridgesemantics.com/anzograph/v3.1/userdoc/shacl-intro.htm
+#   * LLMs do a decent job at starting the structure, but they sometimes hallucinate rule names.
+#
+# Target considerations:
+#
+# These shapes should enforce the following ideas:
+#   * Datasets should have the target classes of all of:
+#     `dcat:Dataset`, `qb:DataSet`, `schema:Dataset`
+#   * Datasets should have exactly one:
+#       * Label
+#       * Description
+#       * Comment
+#       * Distribution
+#       * Start date
+#       * End date
+#       * Content URL
+#       * isAccessibleForFree
+#       * Keywords
+#       * Name
+#       * Version
+#   * Datasets can have:
+#       * Temporal resolution
+#   * Datasets must have at least one:
+#       * Dimension
+#       * Variable
+#
+#  The shapes also enforce how we use the QB ontology to describe measured variables.
+
+@prefix : <http://kmnlp-demo.noaa.gov/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix qb: <http://purl.org/linked-data/cube#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+:DatasetShape a sh:NodeShape ;
+    sh:targetClass dcat:Dataset, qb:DataSet, schema:Dataset ;
+    sh:class dcat:Dataset, qb:DataSet, schema:Dataset ;
+    sh:message "Dataset instances must be all of: `dcat:Dataset,` `qb:DatatSet,` `schema:Dataset`" ;
+    sh:property [
+        sh:path rdfs:label ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have exactly one `rdfs:label` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path dcterms:description ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have exactly one `dcterms:description` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path schema:description ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have exactly one `dcterms:description` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path qb:structure ;
+        sh:minCount 1 ;
+        sh:class qb:DataStructureDefinition ;
+        sh:message "Dataset must have at least one `qb:structure` of type `qb:DataStructureDefinition`, representing a measured variable"
+    ] ;
+    sh:property [
+        sh:path rdfs:comment ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have exactly one `rdfs:comment` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path dcat:distribution ;
+        sh:class dcat:Distribution ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "Dataset instances must have exactly one `dcat:distribution` of type `dcat:Distribution`"
+    ];
+    sh:property [
+        sh:path dcat:startDate ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:dateTime ;
+        sh:message "Dataset instances must have exactly one `dcat:startDate` of type `xsd:dateTime`"
+    ] ;
+    sh:property [
+        sh:path dcat:endDate ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:dateTime ;
+        sh:message "Dataset instances must have exactly one `dcat:endDate` of type `xsd:dateTime`"
+    ] ;
+    sh:property [
+        sh:path dcat:temporalResolution ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:duration ;
+        sh:message "Dataset instances must have at most one `dcat:temporalResolution` of type `xsd:duration`"
+    ] ;
+    sh:property [
+        sh:path schema:contentUrl ;
+        sh:minCount 1;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:message "Dataset instances must have exactly one `dcat:contentUrl` with an IRI value"
+    ] ;
+    sh:property [
+        sh:path schema:description ;
+        sh:minCount 1;
+        sh:maxCount 1 ;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have exactly one `schema:description` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path schema:isAccessibleForFree ;
+        sh:minCount 1;
+        sh:maxCount 1 ;
+        sh:datatype xsd:boolean ;
+        sh:message "Dataset instances must have exactly one `schema:isAccessibleForFree` of type `xsd:boolean`"
+    ] ;
+    sh:property [
+        sh:path schema:keywords ;
+        sh:minCount 1;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have at least one `schema:keywords` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path schema:name ;
+        sh:minCount 1;
+        sh:maxCount 1;
+        sh:or ( [ sh:datatype xsd:string ] [ sh:datatype rdf:langString ] ) ;
+        sh:message "Dataset instances must have exactly one `schema:name` of type `xsd:string` or `rdf:langString`"
+    ] ;
+    sh:property [
+        sh:path schema:variableMeasured ;
+        sh:minCount 1;
+        sh:NodeKind sh:IRI ;
+        sh:message "Dataset instances must have exactly 2 `schema:variableMeasured` of type `sh:IRI`. The dataset should have at least one dimension and one measured quantity."
+    ] ;
+    sh:property [
+        sh:path schema:version ;
+        sh:minCount 1;
+        sh:maxCount 1;
+        sh:hasValue "2" ;
+        sh:message "Dataset instances must have exactly one `schema:version` of value 2."
+    ] ;
+.
+
+
+:DataStructureDefinitionShape a sh:NodeShape ;
+    sh:targetClass qb:DataStructureDefinition ;
+    sh:property [
+        sh:path (qb:component qb:dimension) ;
+        sh:minCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:message "DataStructureDefinition must have at least one dimension component with an IRI value"
+    ] ;
+    sh:property [
+        sh:path (qb:component qb:measure) ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:message "DataStructureDefinition must have exactly one measure component with an IRI value"
+    ] ;
+.
+
+:DistributionShape a sh:NodeShape ;
+    sh:targetClass dcat:Distribution ;
+    sh:property [
+        sh:path dcat:accessURL ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:message "Distribution instances must have exactly one `dcat:accessURL` with an IRI value"
+    ] ;
+    sh:property [
+        sh:path dcat:mediaType ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:message "Distribution instances must have exactly one `dcat:mediaType` with a `xsd:string` value"
+    ] ;
+.

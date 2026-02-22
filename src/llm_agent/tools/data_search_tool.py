@@ -2,43 +2,52 @@ import logging
 from json import JSONDecodeError
 
 from anyio import from_thread
-from e84_geoai_common.llm.core import (
-    JSONContent,
-    LLMToolResultContent,
-    LLMToolUseContent,
-    TextContent,
-)
-from e84_geoai_common.llm.models import (
-    CLAUDE_BEDROCK_MODEL_IDS,
-    BedrockClaudeLLM,
-)
-from pydantic import BaseModel, ConfigDict
+from e84_geoai_common.util import timed_function
+from langfuse import observe  # type: ignore[reportUnknownVariableType]
+from pydantic import BaseModel, ConfigDict, Field
 
 from llm_agent.agents.dataset_picking_agent.dataset_picking_agent import (
     DatasetPickingAgent,
     DatasetResponseTextContent,
     MaxPromptTurnsExceededError,
+    UnableToExtractJSONFromStringError,
     UnexpectedResponseTypeError,
 )
-from llm_agent.dao import KnowledgeGraphDAO, knowledge_graph_dao
+from llm_agent.context import ToolCallContext
 from llm_agent.model.dataset import Dataset
-from llm_agent.tools.base_tool import BaseTool
-from llm_agent.utils import EnrichedValidationError
+from llm_agent.tools.llm_tool_input import LLMToolInput
+from llm_agent.tools.llm_tool_typed import ErrorResponse, LLMToolTyped, ToolOutput
+from llm_agent.utils.utils import EnrichedValidationError
 
 log = logging.getLogger(__name__)
 
-TOOL_DESCRIPTION = "A tool that searches for relevant climate-related "
-"datasets and variables within those datasets, given a natural language query."
+MAX_NUM_RESULTS = 10
 
-# Not upgrading to Claude 3.7 because it seems to consistently output extra
-# stuff besides the JSON, resulting in JSON decoding errors.
-DEFAULT_MODEL_NAME = "Claude 3.5 Sonnet"
+TOOL_DESCRIPTION = f"""\
+A tool that searches for relevant climate-related datasets and variables within those datasets, \
+given a natural language query.
+
+Results are capped at {MAX_NUM_RESULTS} datasets per call. Call this tool again with the truncated \
+dataset IDs to retrieve more results, if needed.
+"""
 
 
-class _DataSearchToolQuery(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class _DataSearchToolQuery(LLMToolInput):
+    model_config = ConfigDict(
+        # Title in the JSON schema, w/o leading underscore to reduce confusion.
+        title="DataSearchToolQuery",
+        extra="forbid",
+        frozen=True,
+    )
 
     natural_language_query: str
+    dataset_ids: list[str] | None = Field(
+        default=None,
+        description="Specific dataset IDs to restrict the search to, if known. These can be used "
+        "to specify datasets returned in a previous truncated search result. If specified, "
+        "natural_language_query will be ignored.",
+        max_length=MAX_NUM_RESULTS,
+    )
 
 
 class DataSearchToolResult(BaseModel):
@@ -46,34 +55,47 @@ class DataSearchToolResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    datasets: list[Dataset] | None
-    error_message: str | None = None
+    datasets: list[Dataset] = Field(
+        description=f"List of datasets matching the search query, capped at {MAX_NUM_RESULTS}.",
+        max_length=MAX_NUM_RESULTS,
+    )
+    truncated_dataset_ids: list[str] | None = Field(
+        default=None,
+        description="Dataset IDs in the search results that were truncated due to the max results "
+        "limit. These can be requested in a follow-up call.",
+    )
 
 
-class DataSearchTool(BaseTool):
+class SearchInitiatedUpdate(BaseModel):
+    """Event indicating a search has been initiated."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: str
+
+
+class DataSearchTool(
+    LLMToolTyped[_DataSearchToolQuery, DataSearchToolResult, DataSearchToolResult],
+):
     """Tool to query to the dataset picking agent and return its responses."""
 
-    _dataset_picking_agent: DatasetPickingAgent
-
-    def __init__(
-        self,
-        dataset_picking_agent: DatasetPickingAgent,
-        knowledge_graph_dao: KnowledgeGraphDAO = knowledge_graph_dao,
-    ) -> None:
+    def __init__(self, dataset_picking_agent: DatasetPickingAgent) -> None:
         """Initializer."""
         super().__init__(
+            name="DataSearchTool",
             description=TOOL_DESCRIPTION,
             input_model=_DataSearchToolQuery,
-            output_model=DataSearchToolResult,
-            execution_func=self._execute_data_search_tool,
+            user_output_model=DataSearchToolResult,
+            llm_output_model=DataSearchToolResult,
         )
-
         self._dataset_picking_agent = dataset_picking_agent
-        self._knowledge_graph_dao = knowledge_graph_dao
 
-    def _execute_data_search_tool(
-        self, tool_use_request: LLMToolUseContent
-    ) -> LLMToolResultContent:
+    @observe(as_type="tool", name=__name__)
+    @timed_function()
+    def _execute_typed(
+        self, context: ToolCallContext, tool_input: _DataSearchToolQuery
+    ) -> ToolOutput[DataSearchToolResult, DataSearchToolResult] | ErrorResponse:
+        context.update_progress(SearchInitiatedUpdate(query=tool_input.natural_language_query))
         # `from_thread.run` is used to call an asynchronous function from a
         # synchronous function in a worker thread.
         #
@@ -83,23 +105,31 @@ class DataSearchTool(BaseTool):
         #
         # DO NOT use `from_thread.run_sync` for this purpose. That method will
         # run the relevant code on the main event loop thread.
-        return from_thread.run(
-            self._a_execute_data_search_tool, tool_use_request
-        )
+        out = from_thread.run(self._a_execute_data_search_tool, context, tool_input)
+        if isinstance(out, ErrorResponse):
+            return out
+        return ToolOutput(user=out, llm=out)
 
     async def _a_execute_data_search_tool(
-        self, tool_use_request: LLMToolUseContent
-    ) -> LLMToolResultContent:
+        self, context: ToolCallContext, query_params: _DataSearchToolQuery
+    ) -> DataSearchToolResult | ErrorResponse:
         """Execute Data Search Tool asynchronlously."""
-        query_params = _DataSearchToolQuery.model_validate(
-            tool_use_request.input
-        )
+        knowledge_graph_dao = context.global_context.knowledge_graph_dao
+        if query_params.dataset_ids:
+            # If dataset IDs are provided, fetch those specific datasets directly
+            dataset_ids = query_params.dataset_ids
+            included_ids, truncated_ids = (
+                dataset_ids[:MAX_NUM_RESULTS],
+                dataset_ids[MAX_NUM_RESULTS:],
+            )
+            datasets = knowledge_graph_dao.fetch_datasets(ids=included_ids)
+            return DataSearchToolResult(datasets=datasets)
 
         try:
             parsed_responses = [
                 content
                 async for assistant_message in self._dataset_picking_agent.run(
-                    query_params.natural_language_query
+                    context.global_context, query_params.natural_language_query
                 )
                 for content in assistant_message.parsed_content
                 if (isinstance(content, DatasetResponseTextContent))
@@ -110,6 +140,7 @@ class DataSearchTool(BaseTool):
             EnrichedValidationError,
             UnexpectedResponseTypeError,
             MaxPromptTurnsExceededError,
+            UnableToExtractJSONFromStringError,
         ) as e:
             message: str
             match e:
@@ -125,35 +156,15 @@ class DataSearchTool(BaseTool):
                 case MaxPromptTurnsExceededError():
                     message = "Max tool use turns in DatasetPickingAgent"
 
-            return LLMToolResultContent(
-                id=tool_use_request.id,
-                content=[TextContent(text=message)],
-                status="error",
-            )
+                case UnableToExtractJSONFromStringError():
+                    message = "Error extracting JSON from response"
 
-        dataset_iris = [
-            iri
-            for response in parsed_responses
-            for iri in response.result or []
-        ]
-        datasets = self._knowledge_graph_dao.get_datasets_by_iris(dataset_iris)
-        return LLMToolResultContent(
-            id=tool_use_request.id,
-            content=[
-                JSONContent(
-                    data=DataSearchToolResult(datasets=datasets).model_dump(
-                        mode="json"
-                    )
-                )
-            ],
-            status="success",
+            return ErrorResponse(message=message)
+
+        dataset_ids = [id_ for response in parsed_responses for id_ in response.result or []]
+        included_ids, truncated_ids = dataset_ids[:MAX_NUM_RESULTS], dataset_ids[MAX_NUM_RESULTS:]
+        datasets = knowledge_graph_dao.fetch_datasets(ids=included_ids)
+        return DataSearchToolResult(
+            datasets=datasets,
+            truncated_dataset_ids=truncated_ids or None,
         )
-
-
-data_search_tool = DataSearchTool(
-    DatasetPickingAgent(
-        llm=BedrockClaudeLLM(
-            model_id=CLAUDE_BEDROCK_MODEL_IDS[DEFAULT_MODEL_NAME]
-        )
-    )
-)

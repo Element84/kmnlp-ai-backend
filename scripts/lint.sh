@@ -6,7 +6,7 @@
 
 set -e -o pipefail
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 echo "Running shellcheck"
 "$SCRIPT_DIR/shellcheck.sh"
 
@@ -19,10 +19,13 @@ pyright src/ tests/ evals/
 echo "---"
 
 echo "Checking if code has been formatted with Ruff"
-if ! ruff format --check; then
+if ! ruff format src/ tests/ evals/ --check; then
     echo "ERROR: Code has not been formatted with Ruff. Please run: ruff format."
     exit 1
 fi
 echo "---"
+
+echo "Checking whether graph matches SHACL constraints"
+pyshacl -s "src/llm_agent/data/dataset-constraints.shacl" "src/llm_agent/data/dataset-kg-generated.ttl"
 
 echo "All linting checks passed!"

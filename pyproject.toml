@@ -13,15 +13,24 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
   "boto3>=1.35.20",
-  "boto3-stubs[bedrock-runtime]>=1.35.20",
+  "boto3-stubs[bedrock-runtime, s3]>=1.35.20",
   "pydantic>=2.9.1",
-  "e84-geoai-common @ git+https://github.com/Element84/e84-geoai-common",
-  "natural-language-geocoding==0.0.3",
+  "e84-geoai-common @ git+https://github.com/Element84/e84-geoai-common@78f6bc8349ad560540e970a01c9ba0fdbe25a0d0",
+  "natural-language-geocoding[geocode_index]>=0.1.1",
   "rastervision_pipeline @ git+https://github.com/azavea/raster-vision#egg=$rastervision_pipeline&subdirectory=rastervision_pipeline",
   "rastervision_core @ git+https://github.com/azavea/raster-vision#egg=$rastervision_core&subdirectory=rastervision_core",
   "rich",
-  "triangle==20250106",
+  "triangle",
   "rdflib>=7.1.3",
+  "nc-time-axis>=1.4.1",
+  "tenacity>=9.1.2",
+  "chromadb>=1.0.15",
+  "fastparquet>=2024.11.0",
+  "humanize>=4.12.3",
+  "langfuse>=3.6.1",
+  "json-repair>=0.52.3",
+  "simple-service-compose>=0.1.0",
+  "geojson-pydantic>=2.1.0",
 ]
 dynamic = ["version"]
 
@@ -31,24 +40,23 @@ llm_agent = ["data/*.ttl"]
 [tool.pytest.ini_options]
 pythonpath = "src"
 testpaths = ["tests"]
-markers = ["integration: test that requires making network calls to an LLM"]
+markers = [
+  "integration: test that requires making network calls to an LLM",
+  "enable_socket: enable socket connections for this test",
+]
+asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# pytest-socket configuration: disable sockets by default, allow localhost for Dask
+addopts = "--disable-socket --allow-hosts=127.0.0.1"
 
 [project.urls]
 Gitlab = "https://repo.element84.com/noaa_km_nlp/llm-agent"
 
-[project.optional-dependencies]
-debugging = ["folium>=0.17.0"]
-testing = [
-  "pytest>=8.3.3",
-  "pytest-asyncio>=1.0.0",
-  "ruff>=0.9",
-  "pyright>=1.1.394",
-]
+[dependency-groups]
 dev = [
-  "appnope>=0.1.4", # Required for Jupyter on OS X
   "build>=1.2.2",
   "debugpy",
+  "folium>=0.17.0",
   "ipykernel>=6.29.5",
   "ipython>=8.28.0",
   "ipywidgets>=8.1.5",
@@ -56,18 +64,31 @@ dev = [
   "pre-commit-hooks>=4.6.0",
   "pre-commit>=3.8.0",
   "pyinstrument>=5.0.2",
+  "pyshacl>=0.30.1",
+  "pytest-watch",
+  "types-shapely>=2.1.0.20250917",
 ]
+test = [
+  "pyright[nodejs]>=1.1.407",
+  "pytest-asyncio>=1.0.0",
+  "pytest-socket>=0.7.0",
+  "pytest-xdist>=3.8.0",
+  "pytest>=8.3.3",
+  "ruff>=0.9",
+]
+
+[project.optional-dependencies]
 data_processing = [
   "bokeh>=3.1.0",
   "cartopy",
   "contextily",
   "dask[distributed]",
-  "fsspec>=2024.12.0",
-  "s3fs>=2024.12.0",
+  "fsspec>=2025.7.0",
+  "s3fs>=2025.7.0",
   "geopandas",
   "h5netcdf",
   "h5py",
-  "kerchunk",
+  "kerchunk>=0.2.9",
   "lat_lon_parser",
   "matplotlib",
   "netCDF4",
@@ -80,31 +101,35 @@ data_processing = [
   "shapely",
   "tqdm",
   "virtualizarr",
-  "xarray",
-  # constraining because of https://github.com/zarr-developers/zarr-python/issues/2706
-  "zarr<3",
+  "xarray>=2025.7.1",
+  "zarr>=3.1.1",
+]
+
+[tool.uv]
+default-groups = ["dev", "test"]
+required-environments = [
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.pyright]
-include = ["src/"]
-ignore = ["**/venv/**", "*.pyc"]
+include = ["src/", "tests/", "evals/"]
+ignore = ["**/.venv/**"]
+exclude = ["notebooks", "**/.venv/**", "*.pyc"]
 typeCheckingMode = "strict"
 reportGeneralTypeIssues = true
 reportImplicitStringConcatenation = "none"
 reportPropertyTypeMismatch = "error"
-reportShadowedImports = "error"
-reportTypedDictNotRequiredAccess = "none"
 reportUninitializedInstanceVariable = "error"
 reportUnknownArgumentType = "error"
 reportUnknownMemberType = "error"
 reportUnknownVariableType = "error"
 reportUnnecessaryComparison = "error"
-reportIncompatibleVariableOverride = "none"
 
 
 [tool.ruff]
-line-length = 79
-extend-exclude = ["notebooks/", ".history/"]
+line-length = 100
+extend-exclude = [".history/"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -125,17 +150,22 @@ ignore = [
   "D203",
   # Multi-line docstring summary should start at the second line
   "D213",
-  # TODO comment missing author name
+  # T O D O comment missing author name
   "TD002",
-  # TODO comment missing issue link
+  # T O D O comment missing issue link
   "TD003",
-  # comment contains TODO
+  # comment contains T O D O
   "FIX002",
   # comment contains HACK
   "FIX004",
   # recommendations to use Path over os.path -- ignoring because Path does not
   # work with S3 URIs
   "PTH",
+  # Exceptions
+  # Allow messages inside errors
+  "TRY003",
+  # Allow f-strings in exception messages
+  "EM102",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -157,7 +187,13 @@ ignore = [
   # magic values
   "PLR2004",
 ]
-
-[dependency-groups]
-dev = [
+"notebooks/**/*" = [
+  # Use of assert detected
+  "S101",
+  # Missing return type annotation for public function
+  "ANN201",
+  # Missing docstrings
+  "D1",
+  # Commented out code
+  "ERA001",
 ]

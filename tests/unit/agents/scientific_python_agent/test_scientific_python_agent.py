@@ -1,15 +1,12 @@
-from e84_geoai_common.llm.models.claude import (
-    CLAUDE_BEDROCK_MODEL_IDS,
-    BedrockClaudeLLM,
-)
-from e84_geoai_common.llm.tests.mock_bedrock import (
+from e84_geoai_common.llm.models.claude import BedrockClaudeLLM
+from e84_geoai_common.llm.tests.mock_bedrock_runtime import (
     _MockBedrockRuntimeClient,  # type: ignore[reportPrivateUsage]
     claude_response_with_content,
-    make_test_bedrock_client,
+    make_test_bedrock_runtime_client,
 )
 
+from llm_agent import PYTHON_AGENT_DEFAULT_LLM_MODEL_ID
 from llm_agent.agents.scientific_python_agent import ScientificPythonAgent
-from llm_agent.utils import DEFAULT_MODEL_NAME
 
 SETUP_CODE = """\
 import os
@@ -232,11 +229,9 @@ dolor
 <explanation>__explanation__</explanation>
 amet
 """)
-    client = make_test_bedrock_client([dummy_response])
+    client = make_test_bedrock_runtime_client([dummy_response])
     llm = BedrockClaudeLLM(client=client)
-    agent = ScientificPythonAgent(
-        llm, setup_code=SETUP_CODE, setup_output=SETUP_OUTPUT
-    )
+    agent = ScientificPythonAgent(llm, setup_code=SETUP_CODE, setup_output=SETUP_OUTPUT)
     query = "What is the mean SST value over the entire dataset?"
     solution = agent.run(query)
     if not isinstance(client, _MockBedrockRuntimeClient):
@@ -254,13 +249,9 @@ dolor
 <explanation>__explanation__</explanation>
 amet
 """)
-    client = make_test_bedrock_client([dummy_response])
-    llm = BedrockClaudeLLM(
-        model_id=CLAUDE_BEDROCK_MODEL_IDS[DEFAULT_MODEL_NAME], client=client
-    )
-    agent = ScientificPythonAgent(
-        llm, setup_code=SETUP_CODE, setup_output=SETUP_OUTPUT
-    )
+    client = make_test_bedrock_runtime_client([dummy_response])
+    llm = BedrockClaudeLLM(model_id=PYTHON_AGENT_DEFAULT_LLM_MODEL_ID, client=client)
+    agent = ScientificPythonAgent(llm, setup_code=SETUP_CODE, setup_output=SETUP_OUTPUT)
     query = "Which variables are available in the dataset?"
     solution = agent.run(query)
     # print out solution if doing a live test

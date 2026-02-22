@@ -1,30 +1,74 @@
 from abc import ABC
-from collections.abc import Collection
+from collections.abc import Sequence
 from datetime import datetime, timedelta
-from os.path import basename
-from typing import Generic, Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from geojson_pydantic.geometries import Geometry
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
 from llm_agent.agents.algorithm_agent.algorithm.base import (
     Algorithm,
+    BaseFunctionCall,
+)
+from llm_agent.agents.algorithm_agent.algorithm.function_sets import (
     FunctionSet,
+    GeneralDataArrayFunctionSet,
+    GeneralPlottingFunctionSet,
+    SpatioTemporalDataArrayFunctionSet,
+    TemporalDataArrayFunctionSet,
 )
 from llm_agent.model.dataset import Dataset
+from llm_agent.model.dimension import Dimension
 from llm_agent.model.variable import Variable
 
 # InputVariable should be a union of supported input variable types
-type InputVariable = SpatioTemporalDataArrayVariable
+type InputVariable = (
+    SpatioTemporalDataArrayVariable | TemporalDataArrayVariable | GeneralDataArrayVariable
+)
+
+DimensionSet = Annotated[
+    frozenset[str],
+    PlainSerializer(lambda dims: sorted(dims), return_type=list[str], when_used="json"),
+]
 
 
-class UnsupportedVariableDimsError(Exception):
-    """Variable has an unsupported set of dimensions."""
+class GeneralDataArrayVariable(BaseModel):
+    """A DataArray variable with arbitrary dimensions."""
 
-    def __init__(self, dims: Collection[str]) -> None:  # noqa: D107
-        super().__init__(
-            'Only variables with dims == {"latitude", "longitude", "time"} '
-            f"are currently supported. Got dims: {dims}."
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(description="Name of the variable.")
+    variable_type: Literal["DataArray"] = Field(
+        default="DataArray",
+        description="The type of the variable, specified as a string.",
+    )
+    description: str | None = Field(description="Description of the variable.")
+    dimensions: list[Dimension] = Field(description="Dimensions of the DataArray.")
+    units: str | None = Field(description="The units of the values in the data.")
+
+
+class TemporalDataArrayVariable(BaseModel):
+    """A DataArray variable with a time dim plus other arbitrary dims."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(description="Name of the variable.")
+    variable_type: Literal["DataArray"] = Field(
+        default="DataArray",
+        description="The type of the variable, specified as a string.",
+    )
+    description: str | None = Field(description="Description of the variable.")
+    dimensions: list[Dimension] = Field(description="Dimensions of the DataArray.")
+    time_dim: str = Field(description="The time dimension of the DataArray.")
+    units: str | None = Field(description="The units of the values in the data.")
+    temporal_coverage: tuple[datetime, datetime] = Field(
+        description="The start and end times that the variable covers"
+    )
+    temporal_resolution: timedelta | None = Field(
+        description=(
+            "The resolution of the time field for the variable, or the time between each data point"
         )
+    )
 
 
 class SpatioTemporalDataArrayVariable(BaseModel):
@@ -34,12 +78,13 @@ class SpatioTemporalDataArrayVariable(BaseModel):
 
     name: str = Field(description="Name of the variable.")
     variable_type: Literal["DataArray"] = Field(
+        default="DataArray",
         description="The type of the variable, specified as a string.",
     )
     description: str | None = Field(description="Description of the variable.")
-    units: str | None = Field(
-        description="The units of the values in the data."
-    )
+    dimensions: list[Dimension] = Field(description="Dimensions of the DataArray.")
+    time_dim: str = Field(description="The time dimension of the DataArray.")
+    units: str | None = Field(description="The units of the values in the data.")
     spatial_coverage: Literal["global"] = Field(
         description="The spatial area for which the variable has values."
     )
@@ -48,15 +93,23 @@ class SpatioTemporalDataArrayVariable(BaseModel):
     )
     temporal_resolution: timedelta | None = Field(
         description=(
-            "The resolution of the time field for the variable, or the time "
-            "between each data point"
+            "The resolution of the time field for the variable, or the time between each data point"
         )
     )
 
+    @field_validator("dimensions")
+    @classmethod
+    def _ensure_lat_lon_dims(cls, dims: list[Dimension]) -> list[Dimension]:
+        dim_std_names = {dim.cf_standard_name for dim in dims}
+        if not {"latitude", "longitude"}.issubset(dim_std_names):
+            msg = (
+                "SpatioTemporalDataArrayVariable must have both latitude and longitude dimensions."
+            )
+            raise ValueError(msg)
+        return dims
 
-def input_variable_from_model(
-    variable: Variable, dataset: Dataset
-) -> InputVariable:
+
+def input_variable_from_model(variable: Variable, dataset: Dataset) -> InputVariable:
     """Transform from model.Variable to SpatioTemporalDataArrayVariable.
 
     Args:
@@ -66,29 +119,56 @@ def input_variable_from_model(
 
     Returns:
         InputVariable: An `InputVariable`.
-
-    Raises:
-        UnsupportedVariableDimsError: If variable does not have
-            dims == {"latitude", "longitude", "time"}.
     """
-
-    def _name_from_maybe_iri(iri: str | None) -> str | None:
-        return basename(iri) if iri is not None else None
-
-    # The type: ignore is for a pyright false positive about frozenset != set.
-    # The comparison in fact works as expected.
-    if variable.dimensions != {"latitude", "longitude", "time"}:  # type: ignore[reportUnnecessaryComparison]
-        raise UnsupportedVariableDimsError(variable.dimensions)
-
-    return SpatioTemporalDataArrayVariable(
+    if variable.is_spatiotemporal():
+        return SpatioTemporalDataArrayVariable(
+            name=variable.field_name,
+            description=variable.description,
+            dimensions=variable.dimensions,
+            time_dim=next(dim.field_name for dim in variable.dimensions if dim.is_temporal()),
+            units=variable.units,
+            spatial_coverage=dataset.spatial_coverage,
+            temporal_coverage=dataset.temporal_coverage,
+            temporal_resolution=dataset.temporal_resolution,
+        )
+    if variable.is_temporal():
+        return TemporalDataArrayVariable(
+            name=variable.field_name,
+            description=variable.description,
+            dimensions=variable.dimensions,
+            time_dim=next(dim.field_name for dim in variable.dimensions if dim.is_temporal()),
+            units=variable.units,
+            temporal_coverage=dataset.temporal_coverage,
+            temporal_resolution=dataset.temporal_resolution,
+        )
+    return GeneralDataArrayVariable(
         name=variable.field_name,
-        variable_type="DataArray",
         description=variable.description,
-        units=_name_from_maybe_iri(variable.units),
-        spatial_coverage=dataset.spatial_coverage,
-        temporal_coverage=dataset.temporal_coverage,
-        temporal_resolution=dataset.temporal_resolution,
+        dimensions=variable.dimensions,
+        units=variable.units,
     )
+
+
+def input_vars_to_function_set(
+    input_vars: Sequence[InputVariable],
+) -> FunctionSet:
+    """Build function set for given input variables."""
+    func_sets = [_input_var_to_function_set(v) for v in input_vars]
+    if len(func_sets) == 0:
+        return FunctionSet()
+    return FunctionSet.merge([*func_sets, GeneralPlottingFunctionSet()])
+
+
+def _input_var_to_function_set(input_var: InputVariable) -> FunctionSet:
+    """Map input variable to appropriate function set."""
+    dim_field_names = frozenset(dim.field_name for dim in input_var.dimensions)
+    match input_var:
+        case SpatioTemporalDataArrayVariable():
+            return SpatioTemporalDataArrayFunctionSet(allowed_dims=dim_field_names)
+        case TemporalDataArrayVariable():
+            return TemporalDataArrayFunctionSet(allowed_dims=dim_field_names)
+        case GeneralDataArrayVariable():
+            return GeneralDataArrayFunctionSet(allowed_dims=dim_field_names)
 
 
 class OutputVariable(BaseModel):
@@ -133,17 +213,21 @@ class AlgorithmProblemSpec(ProblemSpec):
     """Specification of an algorithmic problem."""
 
     statement: str = Field(description="The problem statement.")
-    inputs_provided: list[InputVariable] = Field(
+    inputs_provided: Sequence[InputVariable] = Field(
         description="List of variables that can be assumed to already exist "
         "and can be safely referenced in the algorithm.",
+        min_length=1,
+    )
+    user_provided_geometry: Geometry | None = Field(
+        description="The user-provided geometry the algorithm should use for analysis.",
     )
     outputs_requested: list[OutputVariable] = Field(
-        description="Variables that must be included as outputs of "
-        "the algorithm.",
+        description="Variables that must be included as outputs of the algorithm.",
+        min_length=1,
     )
 
 
-class AlgorithmSolutionSpec(SolutionSpec, Generic[FunctionSet]):
+class AlgorithmSolutionSpec[FunctionCall: BaseFunctionCall](SolutionSpec):
     """Specification of an algorithmic solution."""
 
     thoughts: str = Field(
@@ -171,7 +255,7 @@ class AlgorithmSolutionSpec(SolutionSpec, Generic[FunctionSet]):
         "algorithm schema, the output of each function call must be assigned "
         "to a variable. Function calls MUST NOT be composed."
     )
-    algorithm: Algorithm[FunctionSet] = Field(
+    algorithm: Algorithm[FunctionCall] = Field(
         description="The algorithm. The statements and return variables of "
         "the algorithm can be set to empty lists in case of error.",
     )

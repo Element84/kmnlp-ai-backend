@@ -24,9 +24,7 @@ class ExecEnv:
 
     namespace: dict[str, Any]
 
-    def __init__(
-        self, extra_imports: list[type | Callable[(...), Any]] | None = None
-    ) -> None:
+    def __init__(self, extra_imports: list[type | Callable[(...), Any]] | None = None) -> None:
         """Constructor.
 
         Args:

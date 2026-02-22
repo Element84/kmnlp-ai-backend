@@ -7,8 +7,9 @@ from e84_geoai_common.llm.core import (
     LLM,
     Agent,
     LLMInferenceConfig,
-    LLMMessage,
+    LLMUserMessage,
 )
+from e84_geoai_common.util import timed_function
 
 from llm_agent.agents.scientific_python_agent.utils import (
     ExecOutput,
@@ -28,7 +29,8 @@ from llm_agent.agents.scientific_python_agent.utils.misc import (
     get_function_def,
     parse_code_solution,
 )
-from llm_agent.utils import get_current_date
+from llm_agent.context import LLMAgentContext
+from llm_agent.utils.utils import get_current_date
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +119,7 @@ ${query}
 """)
 
 
-class ScientificPythonAgent(Agent):
+class ScientificPythonAgent(Agent[LLMAgentContext]):
     """Writes scientific Python code to extract insights from data."""
 
     utils: list[Callable[..., Any]] = DEFAULT_UTILS
@@ -146,22 +148,17 @@ class ScientificPythonAgent(Agent):
         self.setup_code = setup_code
         self.setup_output = str(setup_output)
         utils_str = "\n\n".join(get_function_def(func) for func in self.utils)
-        self.system_prompt = (
-            SCIENTIFIC_PYTHON_SYSTEM_PROMPT_TEMPLATE.substitute(
-                python_version=PYTHON_VERSION,
-                setup_code=self.setup_code,
-                setup_output=self.setup_output,
-                utils=utils_str,
-                current_date=get_current_date(),
-            )
+        self.system_prompt = SCIENTIFIC_PYTHON_SYSTEM_PROMPT_TEMPLATE.substitute(
+            python_version=PYTHON_VERSION,
+            setup_code=self.setup_code,
+            setup_output=self.setup_output,
+            utils=utils_str,
+            current_date=get_current_date(),
         )
         self._prompt_template = SCIENTIFIC_PYTHON_PROMPT_TEMPLATE
         if inference_cfg is not None:
             if inference_cfg.system_prompt is not None:
-                msg = (
-                    "system_prompt should not be set in the provided "
-                    "LLMInferenceConfig"
-                )
+                msg = "system_prompt should not be set in the provided LLMInferenceConfig"
                 raise ValueError(msg)
             inference_cfg = inference_cfg.model_copy(
                 update={
@@ -178,11 +175,12 @@ class ScientificPythonAgent(Agent):
             )
         self.inference_cfg = inference_cfg
 
+    @timed_function()
     def run(self, query: str) -> LLMCodeSolution:
         """Translate query into Python code."""
-        prompt = self._prompt_template.substitute(query=query)
+        prompt_str = self._prompt_template.substitute(query=query)
         response = self.llm.prompt(
-            messages=[LLMMessage(role="user", content=prompt)],
+            messages=[LLMUserMessage(content=prompt_str)],
             inference_cfg=self.inference_cfg,
         )
         text = response.to_text_only()

@@ -2,8 +2,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-import fsspec  # type: ignore[reportMissingTypeStubs]
 from pydantic import BaseModel
+
+from llm_agent.utils.utils import model_from_file, model_to_file
 
 log = logging.getLogger(__name__)
 
@@ -12,6 +13,8 @@ class ExperimentConfig(BaseModel):
     """Name and parameters of the experiment."""
 
     name: str
+    dataset_id: str
+    dataset_version: str
     params: dict[str, Any]
 
 
@@ -27,6 +30,8 @@ class EvalInput(BaseModel):
 class EvalDataset(BaseModel):
     """An evaluation dataset."""
 
+    id: str
+    version: str
     items: list[EvalInput]
 
 
@@ -42,22 +47,67 @@ class EvalReport(BaseModel):
     """Evaluation report for an experiment."""
 
     experiment_config: ExperimentConfig
-    results: list[SingleEvalResult]
+    results: list[SingleEvalResult] | None
     aggregated_metrics: dict[str, Any]
 
 
 class BaseEvaluator(ABC):
     """Base eval class."""
 
-    @abstractmethod
     async def eval_dataset(
+        self, experiment_config: ExperimentConfig, dataset: EvalDataset
+    ) -> EvalReport:
+        """Evaluate a dataset using the given experiment config."""
+        if not (
+            experiment_config.dataset_id == dataset.id
+            and experiment_config.dataset_version == dataset.version
+        ):
+            msg = (
+                "Mismatch between the dataset provided and the "
+                "dataset configured in the experiment config."
+            )
+            raise ValueError(msg)
+
+        return await self._eval_dataset(experiment_config, dataset)
+
+    @abstractmethod
+    async def _eval_dataset(
         self, experiment_config: ExperimentConfig, dataset: EvalDataset
     ) -> EvalReport:
         """Evaluate a dataset using the given experiment config."""
 
     def save_eval_report(self, eval_report: EvalReport, path: str) -> None:
         """Save eval report as a JSON file."""
-        log.info("Writing eval report to %s", path)
-        fs, path = fsspec.url_to_fs(path, auto_mkdir=True)  # type: ignore[reportUnknownMemberType]
-        with fs.open(path, "w") as f:
-            f.write(eval_report.model_dump_json(indent=2))
+        model_to_file(path, eval_report)
+
+    async def aggregate_eval_reports(self, report_paths: list[str], output_path: str) -> None:
+        """Aggregate eval reports from multiple experiment runs."""
+        if not report_paths:
+            raise ValueError
+
+        reports = [self._load_eval_report(path) for path in report_paths]
+
+        unique_exps = {
+            (
+                r.experiment_config.name,
+                r.experiment_config.dataset_id,
+                r.experiment_config.dataset_version,
+            )
+            for r in reports
+        }
+        if len(unique_exps) > 1:
+            msg = (
+                "All reports must have the same experiment name, dataset ID, "
+                f"and dataset version. Found {unique_exps}."
+            )
+            raise ValueError(msg)
+
+        aggregated_report = await self._aggregate_eval_reports(reports)
+        self.save_eval_report(aggregated_report, output_path)
+
+    @abstractmethod
+    async def _aggregate_eval_reports(self, reports: list[EvalReport]) -> EvalReport:
+        """Aggregate eval reports from multiple experiment runs."""
+
+    def _load_eval_report(self, path: str) -> EvalReport:
+        return model_from_file(path, EvalReport)

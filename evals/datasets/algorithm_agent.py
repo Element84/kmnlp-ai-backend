@@ -2,37 +2,47 @@
 # ruff: noqa: E501
 
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict, cast
 
-import llm_agent.agents.algorithm_agent.algorithm.data_array_functions as da_ops
-from llm_agent.agents.algorithm_agent.algorithm import (
-    DataArrayFunctionSet,
-    GeneralPlottingFunctionSet,
-)
+import llm_agent.agents.algorithm_agent.algorithm.function_sets.data_array_functions as da_ops
+import llm_agent.agents.algorithm_agent.algorithm.function_sets.general_plot_functions as plot_ops
 from llm_agent.agents.algorithm_agent.algorithm.base import (
     Algorithm,
-    FunctionCall,
+    BaseFunctionCall,
+    Function,
     VariableAssignment,
     VariableReference,
+    make_function_call_model,
 )
-from llm_agent.agents.algorithm_agent.algorithm.general_plot_functions import (
-    PlotBarChart,
+from llm_agent.agents.algorithm_agent.algorithm.function_sets import (
+    FunctionSet,
 )
 from llm_agent.agents.algorithm_agent.interface import (
     AlgorithmProblemSpec,
     AlgorithmSolutionSpec,
     OutputVariable,
     SpatioTemporalDataArrayVariable,
+    TemporalDataArrayVariable,
+    input_vars_to_function_set,
 )
 from llm_agent.evaluation.algorithm_agent import AlgorithmAgentEvalInput
 from llm_agent.evaluation.base_eval import EvalDataset
+from llm_agent.model.dimension import Dimension
 
-type FuncSet = DataArrayFunctionSet | GeneralPlottingFunctionSet
+dims = {
+    "time": Dimension(id="time", field_name="time", cf_standard_name="time"),
+    "lat": Dimension(id="lat", field_name="lat", cf_standard_name="latitude"),
+    "lon": Dimension(id="lon", field_name="lon", cf_standard_name="longitude"),
+    "wavelength": Dimension(id="wavelength", field_name="wavelength"),
+}
 
 _input_vars = {
     "sst": SpatioTemporalDataArrayVariable(
         name="analysed_sst",
         variable_type="DataArray",
         description="Sea Surface Temperature (SST)",
+        dimensions=[dims["time"], dims["lat"], dims["lon"]],
+        time_dim="time",
         units="degreeC",
         spatial_coverage="global",
         temporal_coverage=(
@@ -45,6 +55,8 @@ _input_vars = {
         name="air_temperature",
         variable_type="DataArray",
         description="NOAA Climate Data Record of Ocean Near-Surface Air Temperature",
+        dimensions=[dims["time"], dims["lat"], dims["lon"]],
+        time_dim="time",
         units="degreeC",
         spatial_coverage="global",
         temporal_coverage=(
@@ -57,6 +69,8 @@ _input_vars = {
         name="wind_speed",
         variable_type="DataArray",
         description="NOAA Climate Data Record of Ocean Near-Surface Wind Speed",
+        dimensions=[dims["time"], dims["lat"], dims["lon"]],
+        time_dim="time",
         units="m s-1",
         spatial_coverage="global",
         temporal_coverage=(
@@ -69,6 +83,8 @@ _input_vars = {
         name="specific_humidity",
         variable_type="DataArray",
         description="NOAA Climate Data Record of Ocean Near-Surface Specific Humidity",
+        dimensions=[dims["time"], dims["lat"], dims["lon"]],
+        time_dim="time",
         units="g kg-1",
         spatial_coverage="global",
         temporal_coverage=(
@@ -77,27 +93,104 @@ _input_vars = {
         ),
         temporal_resolution=timedelta(hours=3),
     ),
+    "SSI": TemporalDataArrayVariable(
+        name="SSI",
+        variable_type="DataArray",
+        description="NOAA Climate Data Record of Yearly Solar Spectral Irradiance (W m-2 nm-1)",
+        dimensions=[dims["time"], dims["wavelength"]],
+        time_dim="time",
+        units="W m-2 nm-1",
+        temporal_coverage=(
+            datetime(year=1610, month=1, day=1, tzinfo=UTC),
+            datetime(year=2023, month=12, day=31, tzinfo=UTC),
+        ),
+        temporal_resolution=None,
+    ),
+    "TSI": TemporalDataArrayVariable(
+        name="TSI",
+        variable_type="DataArray",
+        description="NOAA Climate Data Record of Yearly Total Solar Irradiance (W m-2)",
+        dimensions=[dims["time"]],
+        time_dim="time",
+        units="W m-2",
+        temporal_coverage=(
+            datetime(year=1610, month=1, day=1, tzinfo=UTC),
+            datetime(year=2024, month=12, day=31, tzinfo=UTC),
+        ),
+        temporal_resolution=None,
+    ),
 }
 
-_dataset: list[AlgorithmAgentEvalInput] = [
-    AlgorithmAgentEvalInput(
-        id="empty_query",
-        problem=AlgorithmProblemSpec(
-            statement="...............",
-            inputs_provided=[],
-            outputs_requested=[],
+
+_func_sets: dict[str, FunctionSet] = {
+    "st": input_vars_to_function_set([_input_vars["sst"]]),
+    "time_wvl": input_vars_to_function_set([_input_vars["SSI"]]),
+    "time_only": input_vars_to_function_set([_input_vars["TSI"]]),
+}
+
+
+_FunctionCall: dict[str, type[BaseFunctionCall]] = {
+    "st": make_function_call_model(_func_sets["st"].functions),
+    "time_wvl": make_function_call_model(_func_sets["time_wvl"].functions),
+    "time_only": make_function_call_model(_func_sets["time_only"].functions),
+}
+
+
+class _ConstrainedFunc[T: Function](TypedDict):
+    func: type[T]
+    func_name: str
+
+
+_SliceDataArray: dict[str, _ConstrainedFunc[da_ops.SliceDataArray]] = {
+    "st": {
+        "func": cast(
+            "type[da_ops.SliceDataArray]",
+            _func_sets["st"]["SliceDataArray_LatLonTime"],
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
-            thoughts="",
-            pseudocode="",
-            algorithm=Algorithm[FuncSet](
-                statements=[],
-                output_variables=[],
-            ),
-            explanation="",
-            error_message="Malformed problem.",
+        "func_name": "SliceDataArray_LatLonTime",
+    },
+    "time_wvl": {
+        "func": cast(
+            "type[da_ops.SliceDataArray]",
+            _func_sets["time_wvl"]["SliceDataArray_TimeWavelength"],
         ),
-    ),
+        "func_name": "SliceDataArray_TimeWavelength",
+    },
+    "time_only": {
+        "func": cast(
+            "type[da_ops.SliceDataArray]",
+            _func_sets["time_only"]["SliceDataArray_Time"],
+        ),
+        "func_name": "SliceDataArray_Time",
+    },
+}
+
+_ReduceDataArray: dict[str, _ConstrainedFunc[da_ops.ReduceDataArray]] = {
+    "st": {
+        "func": cast(
+            "type[da_ops.ReduceDataArray]",
+            _func_sets["st"]["ReduceDataArray_LatLonTime"],
+        ),
+        "func_name": "ReduceDataArray_LatLonTime",
+    },
+    "time_wvl": {
+        "func": cast(
+            "type[da_ops.ReduceDataArray]",
+            _func_sets["time_wvl"]["ReduceDataArray_TimeWavelength"],
+        ),
+        "func_name": "ReduceDataArray_TimeWavelength",
+    },
+    "time_only": {
+        "func": cast(
+            "type[da_ops.ReduceDataArray]",
+            _func_sets["time_only"]["ReduceDataArray_Time"],
+        ),
+        "func_name": "ReduceDataArray_Time",
+    },
+}
+
+
+_dataset = [
     AlgorithmAgentEvalInput(
         id="data_query_mismatch",
         problem=AlgorithmProblemSpec(
@@ -110,11 +203,12 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Average humidity value.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[],
                 output_variables=[],
             ),
@@ -134,11 +228,12 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="An animated raster plot of the daily SST in the Black Sea over the month of June 2024.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[],
                 output_variables=[],
             ),
@@ -158,33 +253,30 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="The mean value of the SST.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
                                 op="mean",
                             )
                         ),
                         description="Mean value as DataArray",
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_mean_scalar",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_mean_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_mean_dataarray"),
                             )
                         ),
                         description="Mean value as scalar",
@@ -207,67 +299,58 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="The mean value in the Black Sea on June 01, 2024 the SST.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="black_sea_polygon",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Black Sea",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                polygon=VariableReference(
-                                    name="black_sea_polygon"
-                                ),
+                                data_array=VariableReference(name="analysed_sst"),
+                                polygon=VariableReference(name="black_sea_polygon"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea"
-                                ),
-                                time_range=("2024-06-01", "2024-06-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea"),
+                                dim_slices={"time": ("2024-06-01", "2024-06-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea_filtered"),
                                 op="mean",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_value",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_mean_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_mean_dataarray"),
                             )
                         ),
                     ),
@@ -289,39 +372,36 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="SST maps for Jan 1, 2023 and Aug 1, 2023 stacked vertically.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_jan1_2023",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2023-01-01", "2023-01-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2023-01-01", "2023-01-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_aug1_2023",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2023-08-01", "2023-08-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2023-08-01", "2023-08-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsRaster(
                                 func_name="PlotDataArraysAsRaster",
                                 data_arrays=[
@@ -351,63 +431,56 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Daily average SST within the Chesapeake Bay over the year 2024.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2024-01-01", "2024-12-31"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2024-01-01", "2024-12-31")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Chesapeake Bay",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_chesapeake_bay"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="daily_mean_sst",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GroupByTimeAndReduceDataArray(
                                 func_name="GroupByTimeAndReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="sst_chesapeake_bay"),
                                 op="mean",
                                 time_unit="dayofyear",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsTimeSeries(
                                 func_name="PlotDataArraysAsTimeSeries",
                                 data_arrays=[
@@ -436,63 +509,56 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Monthly average SST within the Chesapeake Bay over the year 2024.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2024-01-01", "2024-12-31"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2024-01-01", "2024-12-31")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Chesapeake Bay",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_chesapeake_bay"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="daily_mean_sst",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GroupByTimeAndReduceDataArray(
                                 func_name="GroupByTimeAndReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="sst_chesapeake_bay"),
                                 op="mean",
                                 time_unit="month",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsTimeSeries(
                                 func_name="PlotDataArraysAsTimeSeries",
                                 data_arrays=[
@@ -521,69 +587,60 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Daily average SST.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature"
-                                ),
-                                time_range=("2020-01-01", "2020-06-30"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="air_temperature"),
+                                dim_slices={"time": ("2020-01-01", "2020-06-30")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Chesapeake Bay",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="air_temperature_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="air_temperature_filtered"),
+                                polygon=VariableReference(name="polygon_chesapeake_bay"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="daily_mean_air_temperature",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GroupByTimeAndReduceDataArray(
                                 func_name="GroupByTimeAndReduceDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="air_temperature_chesapeake_bay"),
                                 op="mean",
                                 time_unit="dayofmonth",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsTimeSeries(
                                 func_name="PlotDataArraysAsTimeSeries",
                                 data_arrays=[
-                                    VariableReference(
-                                        name="daily_mean_air_temperature"
-                                    ),
+                                    VariableReference(name="daily_mean_air_temperature"),
                                 ],
                                 labels=["Chesapeake Bay"],
                                 title="Daily mean air temperature in June 2020",
@@ -608,132 +665,113 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Bar chart comparing the max SST's in Chesapeake Bay, Delaware Bay, and San Pablo Bay in the month of June 2024.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2024-06-01", "2024-06-30"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2024-06-01", "2024-06-30")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Chesapeake Bay",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_delaware_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Delaware Bay",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_san_pablo_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="San Pablo Bay",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_chesapeake_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_chesapeake_bay"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_chesapeake_bay"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_delaware_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_delaware_bay"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_delaware_bay"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_san_pablo_bay",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_san_pablo_bay"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_san_pablo_bay"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_chesapeake_bay_max_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_chesapeake_bay"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_chesapeake_bay"),
                                 op="max",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_delaware_bay_max_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_delaware_bay"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_delaware_bay"),
                                 op="max",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_san_pablo_bay_max_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_san_pablo_bay"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_san_pablo_bay"),
                                 op="max",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_chesapeake_bay_scalar",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
                                 data_array=VariableReference(
@@ -742,20 +780,18 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_delaware_bay_scalar",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_delaware_bay_max_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_delaware_bay_max_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_san_pablo_bay_scalar",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
                                 data_array=VariableReference(
@@ -764,10 +800,10 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="bar_chart",
-                        value=FunctionCall[FuncSet](
-                            func=PlotBarChart(
+                        value=_FunctionCall["st"](
+                            func=plot_ops.PlotBarChart(
                                 func_name="PlotBarChart",
                                 labels=[
                                     "Chesapeake Bay",
@@ -775,15 +811,9 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                                     "San Pablo Bay",
                                 ],
                                 heights=[
-                                    VariableReference(
-                                        name="sst_chesapeake_bay_scalar"
-                                    ),
-                                    VariableReference(
-                                        name="sst_delaware_bay_scalar"
-                                    ),
-                                    VariableReference(
-                                        name="sst_san_pablo_bay_scalar"
-                                    ),
+                                    VariableReference(name="sst_chesapeake_bay_scalar"),
+                                    VariableReference(name="sst_delaware_bay_scalar"),
+                                    VariableReference(name="sst_san_pablo_bay_scalar"),
                                 ],
                                 title="Max SST's",
                             )
@@ -822,67 +852,58 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="The lon of the max value.",
                 ),
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_argmax_coords",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.DataArrayArgmaxCoords(
                                 func_name="DataArrayArgmaxCoords",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
+                                data_array=VariableReference(name="analysed_sst"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="max_value",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.SelectPointCoordsKey(
                                 func_name="SelectPointCoordsKey",
-                                point_coords=VariableReference(
-                                    name="sst_argmax_coords"
-                                ),
+                                point_coords=VariableReference(name="sst_argmax_coords"),
                                 key="value",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="max_value_time",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.SelectPointCoordsKey(
                                 func_name="SelectPointCoordsKey",
-                                point_coords=VariableReference(
-                                    name="sst_argmax_coords"
-                                ),
+                                point_coords=VariableReference(name="sst_argmax_coords"),
                                 key="time",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="max_value_lat",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.SelectPointCoordsKey(
                                 func_name="SelectPointCoordsKey",
-                                point_coords=VariableReference(
-                                    name="sst_argmax_coords"
-                                ),
+                                point_coords=VariableReference(name="sst_argmax_coords"),
                                 key="lat",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="max_value_lon",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.SelectPointCoordsKey(
                                 func_name="SelectPointCoordsKey",
-                                point_coords=VariableReference(
-                                    name="sst_argmax_coords"
-                                ),
+                                point_coords=VariableReference(name="sst_argmax_coords"),
                                 key="lon",
                             )
                         ),
@@ -913,96 +934,81 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Black Sea SST and air temperature on June 01, 2021.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2021-01-01", "2021-01-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2021-01-01", "2021-01-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature"
-                                ),
-                                time_range=("2021-01-01", "2021-01-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="air_temperature"),
+                                dim_slices={"time": ("2021-01-01", "2021-01-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Black Sea",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_black_sea"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_black_sea"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="air_temperature_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_black_sea"
-                                ),
+                                data_array=VariableReference(name="air_temperature_filtered"),
+                                polygon=VariableReference(name="polygon_black_sea"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_black_sea_day_avg",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature_black_sea"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="air_temperature_black_sea"),
                                 dim="time",
                                 op="mean",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsRaster(
                                 func_name="PlotDataArraysAsRaster",
                                 data_arrays=[
                                     VariableReference(name="sst_black_sea"),
-                                    VariableReference(
-                                        name="air_temperature_black_sea_day_avg"
-                                    ),
+                                    VariableReference(name="air_temperature_black_sea_day_avg"),
                                 ],
                                 subplot_grid_shape=(1, 2),
                                 title="Black Sea SST and air temperature on June 01, 2021",
@@ -1047,149 +1053,124 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="A raster plot of the data subset in question.",
                 ),
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="black_sea_polygon",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Black Sea",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                polygon=VariableReference(
-                                    name="black_sea_polygon"
-                                ),
+                                data_array=VariableReference(name="analysed_sst"),
+                                polygon=VariableReference(name="black_sea_polygon"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea"
-                                ),
-                                time_range=("2024-06-01", "2024-06-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea"),
+                                dim_slices={"time": ("2024-06-01", "2024-06-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea_filtered"),
                                 op="mean",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="mean_value",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_mean_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_mean_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_std_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea_filtered"),
                                 op="std",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="std_value",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_std_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_std_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_max_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea_filtered"),
                                 op="max",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="max_value",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_max_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_max_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_min_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea_filtered"),
                                 op="min",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="min_value",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_min_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_min_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="raster_plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsRaster(
                                 func_name="PlotDataArraysAsRaster",
-                                data_arrays=[
-                                    VariableReference(
-                                        name="sst_black_sea_filtered"
-                                    )
-                                ],
+                                data_arrays=[VariableReference(name="sst_black_sea_filtered")],
                                 subplot_grid_shape=(1, 1),
                                 title="Raster plot",
                             )
@@ -1244,153 +1225,126 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Bar plot with the values.",
                 ),
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="black_sea_polygon",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Black Sea",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                polygon=VariableReference(
-                                    name="black_sea_polygon"
-                                ),
+                                data_array=VariableReference(name="analysed_sst"),
+                                polygon=VariableReference(name="black_sea_polygon"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea"
-                                ),
-                                time_range=("2021-06-01", "2021-06-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea"),
+                                dim_slices={"time": ("2021-06-01", "2021-06-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="air_temperature"
-                                ),
-                                polygon=VariableReference(
-                                    name="black_sea_polygon"
-                                ),
+                                data_array=VariableReference(name="air_temperature"),
+                                polygon=VariableReference(name="black_sea_polygon"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_black_sea_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature_black_sea"
-                                ),
-                                time_range=("2021-06-01", "2021-06-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="air_temperature_black_sea"),
+                                dim_slices={"time": ("2021-06-01", "2021-06-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="wind_speed_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="wind_speed"
-                                ),
-                                polygon=VariableReference(
-                                    name="black_sea_polygon"
-                                ),
+                                data_array=VariableReference(name="wind_speed"),
+                                polygon=VariableReference(name="black_sea_polygon"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="wind_speed_black_sea_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="wind_speed_black_sea"
-                                ),
-                                time_range=("2021-06-01", "2021-06-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="wind_speed_black_sea"),
+                                dim_slices={"time": ("2021-06-01", "2021-06-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="specific_humidity_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="specific_humidity"
-                                ),
-                                polygon=VariableReference(
-                                    name="black_sea_polygon"
-                                ),
+                                data_array=VariableReference(name="specific_humidity"),
+                                polygon=VariableReference(name="black_sea_polygon"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="specific_humidity_black_sea_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="specific_humidity_black_sea"
-                                ),
-                                time_range=("2021-06-01", "2021-06-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="specific_humidity_black_sea"),
+                                dim_slices={"time": ("2021-06-01", "2021-06-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="sst_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="sst_black_sea_filtered"),
                                 op="mean",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="mean_sst",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="sst_mean_dataarray"
-                                ),
+                                data_array=VariableReference(name="sst_mean_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
                                 data_array=VariableReference(
                                     name="air_temperature_black_sea_filtered"
                                 ),
@@ -1398,45 +1352,39 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="mean_air_temperature",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="air_temperature_mean_dataarray"
-                                ),
+                                data_array=VariableReference(name="air_temperature_mean_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="wind_speed_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="wind_speed_black_sea_filtered"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="wind_speed_black_sea_filtered"),
                                 op="mean",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="mean_wind_speed",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
-                                data_array=VariableReference(
-                                    name="wind_speed_mean_dataarray"
-                                ),
+                                data_array=VariableReference(name="wind_speed_mean_dataarray"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="specific_humidity_mean_dataarray",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
                                 data_array=VariableReference(
                                     name="specific_humidity_black_sea_filtered"
                                 ),
@@ -1444,9 +1392,9 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="mean_specific_humidity",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.ZeroDimDataArrayToScalar(
                                 func_name="ZeroDimDataArrayToScalar",
                                 data_array=VariableReference(
@@ -1455,20 +1403,16 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="bar_plot",
-                        value=FunctionCall[FuncSet](
-                            func=PlotBarChart(
+                        value=_FunctionCall["st"](
+                            func=plot_ops.PlotBarChart(
                                 func_name="PlotBarChart",
                                 heights=[
                                     VariableReference(name="mean_sst"),
-                                    VariableReference(
-                                        name="mean_air_temperature"
-                                    ),
+                                    VariableReference(name="mean_air_temperature"),
                                     VariableReference(name="mean_wind_speed"),
-                                    VariableReference(
-                                        name="mean_specific_humidity"
-                                    ),
+                                    VariableReference(name="mean_specific_humidity"),
                                 ],
                                 labels=[
                                     "mean_sst",
@@ -1507,102 +1451,87 @@ _dataset: list[AlgorithmAgentEvalInput] = [
                     description="Ratio of SST to air temperature for the Black Sea on June 01, 2021.",
                 )
             ],
+            user_provided_geometry=None,
         ),
-        reference_solution=AlgorithmSolutionSpec[FuncSet](
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["st"]](
             thoughts="",
             pseudocode="",
-            algorithm=Algorithm[FuncSet](
+            algorithm=Algorithm[_FunctionCall["st"]](
                 statements=[
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="analysed_sst"
-                                ),
-                                time_range=("2021-01-01", "2021-01-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="analysed_sst"),
+                                dim_slices={"time": ("2021-01-01", "2021-01-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_filtered",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.FilterDataArray(
-                                func_name="FilterDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature"
-                                ),
-                                time_range=("2021-01-01", "2021-01-01"),
+                        value=_FunctionCall["st"](
+                            func=_SliceDataArray["st"]["func"](
+                                func_name=_SliceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="air_temperature"),
+                                dim_slices={"time": ("2021-01-01", "2021-01-01")},
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="polygon_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.GeocodeNaturalLanguageDescription(
                                 func_name="GeocodeNaturalLanguageDescription",
                                 text="Black Sea",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="sst_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="sst_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_black_sea"
-                                ),
+                                data_array=VariableReference(name="sst_filtered"),
+                                polygon=VariableReference(name="polygon_black_sea"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_black_sea",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.FilterDataArrayByPolygon(
                                 func_name="FilterDataArrayByPolygon",
-                                data_array=VariableReference(
-                                    name="air_temperature_filtered"
-                                ),
-                                polygon=VariableReference(
-                                    name="polygon_black_sea"
-                                ),
+                                data_array=VariableReference(name="air_temperature_filtered"),
+                                polygon=VariableReference(name="polygon_black_sea"),
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="air_temperature_black_sea_day_avg",
-                        value=FunctionCall[FuncSet](
-                            func=da_ops.ReduceDataArray(
-                                func_name="ReduceDataArray",
-                                data_array=VariableReference(
-                                    name="air_temperature_black_sea"
-                                ),
+                        value=_FunctionCall["st"](
+                            func=_ReduceDataArray["st"]["func"](
+                                func_name=_ReduceDataArray["st"]["func_name"],
+                                data_array=VariableReference(name="air_temperature_black_sea"),
                                 dim="time",
                                 op="mean",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="ratio",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.BinaryOperation(
                                 func_name="BinaryOperation",
                                 left=VariableReference(name="sst_black_sea"),
-                                right=VariableReference(
-                                    name="air_temperature_black_sea_day_avg"
-                                ),
+                                right=VariableReference(name="air_temperature_black_sea_day_avg"),
                                 op="div",
                             )
                         ),
                     ),
-                    VariableAssignment[FuncSet](
+                    VariableAssignment[_FunctionCall["st"]](
                         name="plot",
-                        value=FunctionCall[FuncSet](
+                        value=_FunctionCall["st"](
                             func=da_ops.PlotDataArraysAsRaster(
                                 func_name="PlotDataArraysAsRaster",
                                 data_arrays=[VariableReference(name="ratio")],
@@ -1617,6 +1546,107 @@ _dataset: list[AlgorithmAgentEvalInput] = [
             explanation="",
         ),
     ),
+    AlgorithmAgentEvalInput(
+        id="time_only",
+        problem=AlgorithmProblemSpec(
+            statement="Plot the Total Solar Irradiance (TSI) from 1900 to 2000 as a time series",
+            inputs_provided=[_input_vars["TSI"]],
+            outputs_requested=[
+                OutputVariable(
+                    name="tsi_plot",
+                    variable_type="line_plot",
+                    description="TSI time series.",
+                )
+            ],
+            user_provided_geometry=None,
+        ),
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["time_only"]](
+            thoughts="",
+            pseudocode="",
+            algorithm=Algorithm[_FunctionCall["time_only"]](
+                statements=[
+                    VariableAssignment[_FunctionCall["time_only"]](
+                        name="tsi_sliced",
+                        value=_FunctionCall["time_only"](
+                            func=_SliceDataArray["time_only"]["func"](
+                                func_name=_SliceDataArray["time_only"]["func_name"],
+                                data_array=VariableReference(name="TSI"),
+                                dim_slices={"time": ("1900-01-01", "2000-01-01")},
+                            )
+                        ),
+                        description="",
+                    ),
+                    VariableAssignment[_FunctionCall["time_only"]](
+                        name="tsi_plot",
+                        value=_FunctionCall["time_only"](
+                            func=da_ops.PlotDataArraysAsTimeSeries(
+                                func_name="PlotDataArraysAsTimeSeries",
+                                data_arrays=[VariableReference(name="tsi_sliced")],
+                                labels=[""],
+                                title="",
+                            )
+                        ),
+                        description="",
+                    ),
+                ],
+                output_variables=[VariableReference(name="tsi_plot")],
+            ),
+            explanation="",
+        ),
+    ),
+    AlgorithmAgentEvalInput(
+        id="time_wvl_raster",
+        problem=AlgorithmProblemSpec(
+            statement="Visualize SSI as a time-wavelength raster for wavelengths between 200 to 600",
+            inputs_provided=[_input_vars["SSI"]],
+            outputs_requested=[
+                OutputVariable(
+                    name="ssi_plot",
+                    variable_type="raster_plot",
+                    description="SSI time-wavelength raster plot",
+                )
+            ],
+            user_provided_geometry=None,
+        ),
+        reference_solution=AlgorithmSolutionSpec[_FunctionCall["time_wvl"]](
+            thoughts="",
+            pseudocode="",
+            algorithm=Algorithm[_FunctionCall["time_wvl"]](
+                statements=[
+                    VariableAssignment[_FunctionCall["time_wvl"]](
+                        name="ssi_sliced",
+                        value=_FunctionCall["time_wvl"](
+                            func=_SliceDataArray["time_wvl"]["func"](
+                                func_name=_SliceDataArray["time_wvl"]["func_name"],
+                                data_array=VariableReference(name="TSI"),
+                                dim_slices={"wavelength": (200, 600)},
+                            )
+                        ),
+                        description="",
+                    ),
+                    VariableAssignment[_FunctionCall["time_wvl"]](
+                        name="ssi_plot",
+                        value=_FunctionCall["time_wvl"](
+                            func=da_ops.PlotDataArraysAsRaster(
+                                func_name="PlotDataArraysAsRaster",
+                                data_arrays=[VariableReference(name="ssi_sliced")],
+                                subplot_grid_shape=(1, 1),
+                                title="",
+                            )
+                        ),
+                        description="",
+                    ),
+                ],
+                output_variables=[VariableReference(name="ssi_plot")],
+            ),
+            explanation="",
+        ),
+    ),
 ]
 
-dataset = EvalDataset(items=[d.to_eval_input() for d in _dataset])
+
+dataset = EvalDataset(
+    id="default",
+    version="1",
+    items=[d.to_eval_input() for d in _dataset],
+)

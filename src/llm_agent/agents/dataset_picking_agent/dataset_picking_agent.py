@@ -4,28 +4,32 @@ from collections.abc import AsyncGenerator, Iterable
 from string import Template
 
 from anyio import to_thread
-from e84_geoai_common.llm.core import (
-    LLM,
-    Agent,
+from e84_geoai_common.llm.core.llm import (
     Base64ImageContent,
+    CachePointContent,
+    ExecutableLLMTool,
+    LLMAssistantMessage,
     LLMInferenceConfig,
     LLMMessage,
     LLMMessageContentType,
-    LLMTool,
     LLMToolResultContent,
     LLMToolUseContent,
+    LLMUserMessage,
     TextContent,
 )
+from langfuse import observe  # type: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from rich.pretty import pretty_repr
 
-from llm_agent.dao import knowledge_graph_dao
-from llm_agent.tools.fetch_datasets_tool import fetch_datasets_tool
-from llm_agent.utils import EnrichedValidationError
+from llm_agent.context import LLMAgentContext, ToolCallContext
+from llm_agent.tools.fetch_datasets_tool import FetchDatasetsTool
+from llm_agent.utils.prompt_as_service import PromptService
+from llm_agent.utils.utils import EnrichedValidationError, maximum_length_json_string_from_string
 
 log = logging.getLogger(__name__)
 
-MAX_LLM_PROMPT_TURNS = 3
+MAX_LLM_PROMPT_TURNS = 5
+MAX_ALLOWED_CACHE_POINTS = 2
 
 DEFAULT_MAX_OUTPUT_TOKENS = 10_000
 
@@ -86,11 +90,13 @@ ${example_response}
 
 </example>
 
-""")  # noqa: E501
+""")
 
 
 class MaxPromptTurnsExceededError(Exception):
     """Max allowed number of tool-use turns exceeded."""
+
+    conversation: list[LLMMessage]
 
     def __init__(self, conversation: list[LLMMessage]) -> None:
         """Constructor.
@@ -108,19 +114,36 @@ class MaxPromptTurnsExceededError(Exception):
 class UnexpectedResponseTypeError(Exception):
     """Received unexpected response type from LLM."""
 
+    content: Base64ImageContent | LLMToolResultContent | CachePointContent
+
     def __init__(
-        self, content: (Base64ImageContent | LLMToolResultContent)
+        self,
+        content: Base64ImageContent | LLMToolResultContent | CachePointContent,
     ) -> None:
         """Constructor.
 
         Args:
-            content (Base64ImageContent() | LLMToolResultContent()):
+            content (Base64ImageContent | LLMToolResultContent | CachePointContent):
                 The content that is of an unexpected type.
 
         Returns:
             None
         """
         self.content = content
+
+
+class UnableToExtractJSONFromStringError(ValueError):
+    """LLM returned a string that did not seem to contain a JSON object."""
+
+    string: str
+
+    def __init__(self, string: str) -> None:
+        """Constructor.
+
+        Args:
+            string (str): The string returned from the LLM.
+        """
+        self.string = string
 
 
 class DatasetResponseTextContent(BaseModel):
@@ -140,27 +163,19 @@ class DatasetResponseTextContent(BaseModel):
 
     result: list[str] | None = Field(
         default=None,
-        description="IRIs of all relevant datasets to include in the returned "
-        "search results.",
+        description="IDs of all relevant datasets to include in the returned search results.",
     )
 
     is_refusal: bool = Field(
-        description=(
-            "Whether the response indicates that your are unable to answer a "
-            "prompt."
-        )
+        description=("Whether the response indicates that your are unable to answer a prompt.")
     )
 
 
 class DatasetPickingAgentMessage(BaseModel):
     """Wrapper for contents in a single message."""
 
-    parsed_content: list[DatasetResponseTextContent | LLMToolUseContent] = (
-        Field(
-            description=(
-                "Parsed content types present in an LLM assistant response."
-            )
-        )
+    parsed_content: list[DatasetResponseTextContent | LLMToolUseContent] = Field(
+        description=("Parsed content types present in an LLM assistant response.")
     )
 
 
@@ -185,7 +200,7 @@ Specifically, this dataset includes a variable:
 - Field name: analysed_sst
 - Unit: Degrees Celsius
 """,  # noqa: E501
-    result=["http://kmnlp-demo.noaa.gov/crw_daily_5km"],
+    result=["crw_daily_5km"],
     is_refusal=False,
 )
 
@@ -195,27 +210,27 @@ Specifically, this dataset includes a variable:
 # `DatasetPickingAgent`. However, the logic is highly similar and should be
 # consolidated in something like a `ToolUsingAgent` the next time we write
 # similar functionality.
-class DatasetPickingAgent(Agent):
+class DatasetPickingAgent:
     """Identifies relevant datasets to answer queries."""
 
-    llm: LLM
+    prompt_service: PromptService
+    tools: list[ExecutableLLMTool[ToolCallContext]]
     inference_cfg: LLMInferenceConfig
-    tools: dict[str, LLMTool]
 
     def __init__(
         self,
-        llm: LLM,
-        tools: dict[str, LLMTool] | None = None,
+        prompt_service: PromptService,
+        tools: list[ExecutableLLMTool[ToolCallContext]] | None = None,
         *,
         inference_cfg: LLMInferenceConfig | None = None,
     ) -> None:
         """Constructor.
 
         Args:
-            llm (LLM):
-                An LLM instance.
+            prompt_service (PromptService):
+                Prompt service to use when invoking the model.
 
-            tools (dict[str, LLMTool] | None):
+            tools (list[LLMTool]):
                 The tools to make available to the agent. If None, will use
                 the default set, which includes:
                     - fetch_datasets_tool
@@ -224,26 +239,18 @@ class DatasetPickingAgent(Agent):
                 The inference_cfg to use when prompting the LLM. If None, a
                 default config will be provided.
         """
-        self.llm = llm
-        self.tools = tools or {
-            fetch_datasets_tool.name: fetch_datasets_tool,
-        }
-        self.knowledge_graph_dao = knowledge_graph_dao
+        self.prompt_service = prompt_service
+        self.tools = tools or [FetchDatasetsTool()]
+        self.tool_name_to_tool = {t.tool_spec.name: t for t in self.tools}
 
-        if (
-            inference_cfg is not None
-            and inference_cfg.system_prompt is not None
-        ):
-            message = (
-                "system_prompt should not be set in the provided "
-                "LLMInferenceConfig"
-            )
+        if inference_cfg is not None and inference_cfg.system_prompt is not None:
+            message = "system_prompt should not be set in the provided LLMInferenceConfig"
             raise ValueError(message)
 
         default_inference_cfg = LLMInferenceConfig(
             temperature=0,
-            json_mode=True,
-            tools=list(self.tools.values()),
+            response_prefix="{",
+            tools=[tool.tool_spec for tool in self.tools],
             max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
             system_prompt=DATASET_PICKING_AGENT_SYSTEM_PROMPT.substitute(
                 response_format=pretty_repr(
@@ -265,8 +272,9 @@ class DatasetPickingAgent(Agent):
                 )
             )
 
+    @observe(as_type="agent", name="DatasetPickingAgent.run")
     async def run(
-        self, query: str
+        self, context: LLMAgentContext, query: str
     ) -> AsyncGenerator[DatasetPickingAgentMessage]:
         """Prompt the agent with a natural language query for relevant data.
 
@@ -282,8 +290,16 @@ class DatasetPickingAgent(Agent):
         """
         # Keep track of conversation messages throughout this method.
         # The user's query is the first message in the conversation.
-        convo_messages = [LLMMessage(role="user", content=query)]
+        convo_messages: list[LLMMessage] = [
+            LLMUserMessage(
+                content=[
+                    TextContent(text=query),
+                    CachePointContent(),
+                ]
+            )
+        ]
 
+        cache_point_counter = 1
         for _ in range(MAX_LLM_PROMPT_TURNS):
             # Get response to user's query, yield it, and track it to include
             # in future context
@@ -291,15 +307,11 @@ class DatasetPickingAgent(Agent):
 
             yield assistant_message
 
-            convo_messages.append(
-                _assistant_message_to_llm_message(assistant_message)
-            )
+            convo_messages.append(_assistant_message_to_llm_message(assistant_message))
 
-            # Extract too use requests
+            # Extract tool use requests
             tool_use_requests = [
-                c
-                for c in assistant_message.parsed_content
-                if isinstance(c, LLMToolUseContent)
+                c for c in assistant_message.parsed_content if isinstance(c, LLMToolUseContent)
             ]
 
             # If there are no tool use requests, stop executing!
@@ -310,23 +322,24 @@ class DatasetPickingAgent(Agent):
 
             # Execute tools and gather results
             tool_results = [
-                tool_result
-                async for tool_result in self._use_tools(tool_use_requests)
+                tool_result async for tool_result in self._use_tools(context, tool_use_requests)
             ]
 
+            # Naively insert a cache point after every tool result until limit is reached.
+            if cache_point_counter < MAX_ALLOWED_CACHE_POINTS:
+                content = [*tool_results, CachePointContent()]
+                cache_point_counter += 1
+            else:
+                content = tool_results
             # Add all tool results as messages to the conversation,
             # then let the loop run again.
-            tool_results_message = LLMMessage(
-                role="user",
-                content=list(tool_results),
-            )
+            tool_results_message = LLMUserMessage(content=content)
             convo_messages.append(tool_results_message)
         else:
             raise MaxPromptTurnsExceededError(conversation=convo_messages)
 
-    async def run_single(
-        self, convo_messages: list[LLMMessage]
-    ) -> DatasetPickingAgentMessage:
+    @observe(name="DatasetPickingAgent.run_single")
+    async def run_single(self, convo_messages: list[LLMMessage]) -> DatasetPickingAgentMessage:
         """Run a single prompt and return the parsed contents.
 
         Args:
@@ -346,20 +359,9 @@ class DatasetPickingAgent(Agent):
             list[DatasetResponseTextContent | LLMToolUseContent]:
                 The parsed `LLMMessageContentType` elements.
         """
-
-        # Useful because `to_thread.run_sync` takes args of (func, *args),
-        # which breaks kwargs and can be hard to reason about.
-        def _llm_prompt_shim(messages: list[LLMMessage]) -> LLMMessage:
-            return self.llm.prompt(
-                messages=messages, inference_cfg=self.inference_cfg
-            )
-
-        log.debug("Request inference cfg: %s", self.inference_cfg.model_dump())
-        log.debug("Request convo messages: %s", convo_messages)
-        response_message = await to_thread.run_sync(
-            _llm_prompt_shim, convo_messages
-        )
-        log.debug("Response from agent: %s", response_message)
+        log.debug("Request convo messages: %s", pretty_repr(convo_messages))
+        response_message = await self.prompt_service((convo_messages, self.inference_cfg))
+        log.info("Response from agent: %s", pretty_repr(response_message))
         content = response_message.content
 
         # If content is plain string, try to parse it as a response.
@@ -379,21 +381,24 @@ class DatasetPickingAgent(Agent):
             )
 
         # Content is now assured to be a Sequence[LLMMessageContentType]
-        return DatasetPickingAgentMessage(
-            parsed_content=[_parse_content(c) for c in content]
-        )
+        return DatasetPickingAgentMessage(parsed_content=[_parse_content(c) for c in content])
 
     async def _use_tools(
-        self, tool_use_requests: Iterable[LLMToolUseContent]
+        self, context: LLMAgentContext, tool_use_requests: Iterable[LLMToolUseContent]
     ) -> AsyncGenerator[LLMToolResultContent]:
         """Execute tools and yield results as they become available."""
         for tool_use_request in tool_use_requests:
-            tool = self.tools[tool_use_request.name]
+            tool = self.tool_name_to_tool[tool_use_request.name]
+            tool_call_context = ToolCallContext(
+                tool_call_id=tool_use_request.id,
+                global_context=context,
+                progress_callback=None,
+            )
             tool_result = await to_thread.run_sync(
-                tool.execute, tool_use_request
+                tool.execute, tool_call_context, tool_use_request
             )
 
-            log.debug("Tool result: %s", pretty_repr(tool_result))
+            log.info("Tool result: %s", pretty_repr(tool_result))
 
             yield tool_result
 
@@ -423,27 +428,34 @@ def _parse_content(
         case LLMToolUseContent():
             return content
 
-        case Base64ImageContent() | LLMToolResultContent():
+        case Base64ImageContent() | LLMToolResultContent() | CachePointContent():
             log.warning("Unexpected response content type: %s", content)
             raise UnexpectedResponseTypeError(content)
 
 
 def _parse_response_text_content(value: str) -> DatasetResponseTextContent:
     try:
+        json_string = maximum_length_json_string_from_string(value)
+    except ValueError as e:
+        log.exception("Failed to extract JSON string from LLM response: %s", value)
+        raise UnableToExtractJSONFromStringError(value) from e
+
+    try:
         return DatasetResponseTextContent.model_validate(
-            json.loads(value, strict=False), strict=False
+            json.loads(json_string, strict=False), strict=False
         )
     except ValidationError as e:
         raise EnrichedValidationError(e, data=value) from None
 
+    except json.JSONDecodeError:
+        log.exception("Failed to decode message: %s", value)
+        raise
+
 
 def _assistant_message_to_llm_message(
     response: DatasetPickingAgentMessage,
-) -> LLMMessage:
-    return LLMMessage(
-        role="assistant",
-        content=[_serialize_content(c) for c in response.parsed_content],
-    )
+) -> LLMAssistantMessage:
+    return LLMAssistantMessage(content=[_serialize_content(c) for c in response.parsed_content])
 
 
 def _serialize_content(

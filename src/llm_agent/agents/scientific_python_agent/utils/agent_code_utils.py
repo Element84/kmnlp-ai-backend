@@ -1,9 +1,10 @@
 """Utils for use by the agent in its code."""
 
 import asyncio
+import logging
 import os
-from typing import TYPE_CHECKING
 
+import humanize.filesize
 import numpy as np
 import numpy.typing as npt
 import xarray as xr
@@ -11,8 +12,12 @@ from dask.distributed import (
     Future,
     get_client,  # type: ignore[reportUnknownVariableType]
 )
+from e84_geoai_common.geometry import geometry_to_polygon
 from e84_geoai_common.llm.models import BedrockClaudeLLM
+from langfuse import observe  # type: ignore[reportUnknownVariableType]
+from lat_lon_parser import parse  # type: ignore[reportUnknownVariableType]
 from natural_language_geocoding import extract_geometry_from_text
+from natural_language_geocoding.place_lookup import PlaceLookup
 from rasterio.features import (  # type: ignore[reportMissingTypeStubs]
     rasterize,  # type: ignore[reportUnknownVariableType]
 )
@@ -20,14 +25,42 @@ from rasterio.transform import (  # type: ignore[reportMissingTypeStubs]
     from_bounds,  # type: ignore[reportUnknownVariableType]
 )
 from rastervision.core.data import RasterioCRSTransformer
+from requests.exceptions import Timeout
+from shapely.geometry import Polygon
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
-if TYPE_CHECKING:
-    from shapely.geometry import Polygon
-    from shapely.geometry.base import BaseGeometry
+log = logging.getLogger(__name__)
+
+MAX_ALLOWED_COMPUTE_SIZE = 5 * 10**9  # 5 GB
 
 
-class DaskArrayComputeError(Exception):
+class DaskComputeError(Exception):
     """Failure to compute values from a dask DataArray."""
+
+
+class DataSizeTooLargeError(Exception):
+    """DataArray size exceeds allowed limit."""
+
+    def __init__(self, nbytes: int) -> None:  # noqa: D107
+        size_str = humanize.filesize.naturalsize(nbytes)
+        size_limit_str = humanize.filesize.naturalsize(MAX_ALLOWED_COMPUTE_SIZE)
+        super().__init__(
+            f"Query requires processing {size_str} of data, "
+            f"which exceeds the allowed limit of {size_limit_str}."
+        )
+
+
+def validate_data_array_size_within_limit(data_array: xr.DataArray) -> None:
+    """Check if DataArray size is within allowed limit."""
+    size_str = humanize.filesize.naturalsize(data_array.nbytes)
+    if data_array.nbytes > MAX_ALLOWED_COMPUTE_SIZE:
+        raise DataSizeTooLargeError(data_array.nbytes)
+    log.info("Processing DataArray of size %s", size_str)
 
 
 # This wraps compute_dask_array() to customize the docstring which is part of
@@ -53,11 +86,13 @@ def compute_dask_array(data_array: xr.DataArray) -> xr.DataArray:
     - If computation does not result in a DataArray, raise an error.
 
     Raises:
-        DaskArrayComputeError: If computation fails for any reason.
+        DaskComputeError: If computation fails for any reason.
     """
     if data_array.chunks is None:
         # not a dask array
         return data_array
+
+    validate_data_array_size_within_limit(data_array)
 
     try:
         client = get_client()
@@ -83,7 +118,7 @@ def compute_dask_array(data_array: xr.DataArray) -> xr.DataArray:
             "client.compute() returned unexpected type "
             f"{type(compute_output)}."  # type: ignore[reportUnknownArgumentType]
         )
-        raise DaskArrayComputeError(msg)
+        raise DaskComputeError(msg)
 
     try:
         # sync or await result depending on client state
@@ -95,12 +130,12 @@ def compute_dask_array(data_array: xr.DataArray) -> xr.DataArray:
     except Exception as e:
         method = "asyncio.run()" if client.asynchronous else "client.sync()"
         msg = f"Error encountered when calling {method} on .compute() output."
-        raise DaskArrayComputeError(msg) from e
+        raise DaskComputeError(msg) from e
 
     if not isinstance(result, xr.DataArray):
         method = "asyncio.run()" if client.asynchronous else "client.sync()"
         msg = f"{method} returned unexpected type {type(result)}."  # type: ignore[reportUnknownArgumentType]
-        raise DaskArrayComputeError(msg)
+        raise DaskComputeError(msg)
 
     return result
 
@@ -114,8 +149,6 @@ def geographic_coords_to_decimal_coords(coords: str) -> float:
     Returns:
         Decimal coords in degrees.
     """
-    from lat_lon_parser import parse  # type: ignore[reportUnknownVariableType]
-
     return parse(coords)
 
 
@@ -170,15 +203,15 @@ def max_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     }
     """
     tmp: dict[str, xr.DataArray] = data_array.argmax(dim=...)  # type: ignore[reportAssignmentType]
-    tmp = {k: compute(v) for k, v in tmp.items()}
+    tmp = {k: compute_dask_array(v) for k, v in tmp.items()}
     out = {  # type: ignore[reportUnknownVariableType]
-        k: compute(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
+        k: compute_dask_array(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
         for k, v in tmp.items()
     }
     out["time"] = str(np.datetime_as_string(out["time"]))  # type: ignore[reportArgumentType]
     out["lat"] = round(out["lat"].item(), 6)  # type: ignore[reportArgumentType]
     out["lon"] = round(out["lon"].item(), 6)  # type: ignore[reportArgumentType]
-    out["value"] = compute(data_array.max()).values.item()  # type: ignore[reportMemberType]
+    out["value"] = compute_dask_array(data_array.max()).values.item()  # type: ignore[reportMemberType]
     return out  # type: ignore[reportUnknownVariableType]
 
 
@@ -203,22 +236,30 @@ def min_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     }
     """
     tmp: dict[str, xr.DataArray] = data_array.argmin(dim=...)  # type: ignore[reportAssignmentType]
-    tmp = {k: compute(v) for k, v in tmp.items()}
+    tmp = {k: compute_dask_array(v) for k, v in tmp.items()}
     out = {  # type: ignore[reportUnknownVariableType]
-        k: compute(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
+        k: compute_dask_array(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
         for k, v in tmp.items()
     }
     out["time"] = str(np.datetime_as_string(out["time"]))  # type: ignore[reportArgumentType]
     out["lat"] = round(out["lat"].item(), 6)  # type: ignore[reportArgumentType]
     out["lon"] = round(out["lon"].item(), 6)  # type: ignore[reportArgumentType]
-    out["value"] = compute(data_array.min()).values.item()  # type: ignore[reportMemberType]
+    out["value"] = compute_dask_array(data_array.min()).values.item()  # type: ignore[reportMemberType]
     return out  # type: ignore[reportUnknownVariableType]
 
 
-def geocode_natural_language_description(text: str) -> "BaseGeometry":
+@retry(
+    retry=retry_if_exception(lambda e: isinstance(e, Timeout)),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+@observe()
+def geocode_natural_language_description(place_lookup: PlaceLookup, text: str) -> Polygon:
     """Geocode natural language description of an area into a shapely geometry.
 
     Args:
+        place_lookup: Implementation of place lookup for natural language geocoding.
         text: Natural language description of a location. Example inputs:
             "Caspian Sea", "within 1 mile of the coast of Boston",
             "Florida north of Miami", etc.
@@ -228,16 +269,11 @@ def geocode_natural_language_description(text: str) -> "BaseGeometry":
     """
     os.environ["NOMINATIM_USER_AGENT"] = "e84_nl_geocoding"
     llm = BedrockClaudeLLM()
-    geometry = extract_geometry_from_text(llm, text=text)
-    if geometry.geom_type.lower() == "point":
-        geometry = geometry.buffer(1)
-    return geometry
+    geometry = extract_geometry_from_text(llm, text=text, place_lookup=place_lookup)
+    return geometry_to_polygon(geometry)
 
 
-def polygon_to_mask(
-    polygon: "Polygon",
-    data_array: xr.DataArray,
-) -> npt.NDArray[np.bool_]:
+def polygon_to_mask(polygon: Polygon, data_array: xr.DataArray) -> npt.NDArray[np.bool_]:
     """Create spatial mask from polygon for (time, lat, lon) data_array.
 
     Args:
@@ -247,7 +283,8 @@ def polygon_to_mask(
     Returns:
         2D mask as boolean numpy array of shape (lat, lon).
     """
-    _, array_height, array_width = data_array.shape
+    array_height = data_array.sizes["lat"]
+    array_width = data_array.sizes["lon"]
     lat_min, lat_max = data_array.lat.min(), data_array.lat.max()
     lon_min, lon_max = data_array.lon.min(), data_array.lon.max()
 
@@ -260,10 +297,10 @@ def polygon_to_mask(
         map_crs="EPSG:4326",
         round_pixels=False,
     )
-    aoi_pixel = crs_tf.map_to_pixel(polygon)  # type: ignore[reportUnknownVariableType]
+    aoi_in_pixel_coords = crs_tf.map_to_pixel(polygon)  # type: ignore[reportUnknownVariableType]
 
     mask = rasterize(  # type: ignore[reportUnknownVariableType]
-        shapes=[(aoi_pixel, 1)],
+        shapes=[(aoi_in_pixel_coords, 1)],
         out_shape=(array_height, array_width),
         fill=0,
         dtype=np.uint8,
@@ -274,9 +311,7 @@ def polygon_to_mask(
 
 def mask_data_array_with_polygon(
     data_array: xr.DataArray,
-    polygon: "Polygon",
-    *,
-    crop: bool = False,
+    polygon: Polygon,
 ) -> xr.DataArray:
     """Mask out data_array with polygon, optionally cropping to polygon bounds.
 
@@ -300,5 +335,5 @@ def mask_data_array_with_polygon(
         dims=("lat", "lon"),
         coords={"lat": data_array["lat"], "lon": data_array["lon"]},
     )
-    out = data_array.where(mask_da, drop=crop)
+    out = data_array.where(mask_da, drop=True)
     return out
