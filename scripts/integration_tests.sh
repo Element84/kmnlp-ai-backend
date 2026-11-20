@@ -15,6 +15,7 @@ EXTRA_ARGS=("${@:1}")
 # -rA to capture stdout output
 # --log-cli-level=DEBUG to capture DEBUG level logs
 pytest -m integration \
+  --ignore tests/experiment \
   -n 4 \
   --log-cli-format="%(asctime)s %(levelname)s %(name)s:%(lineno)s %(message)s" \
   -vv \

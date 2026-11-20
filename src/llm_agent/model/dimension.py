@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CanonicalDimension(BaseModel):
@@ -21,3 +21,14 @@ class Dimension(CanonicalDimension):
     """A dimension of a dataset represented in the knowledge graph."""
 
     field_name: str = Field(description="Name of the dimension in the dataset.")
+
+    @field_validator("field_name")
+    @classmethod
+    def _standardize_lat_lon_field_name(cls, field_name: str) -> str:
+        match field_name:
+            case "latitude":
+                return "lat"
+            case "longitude":
+                return "lon"
+            case _:
+                return field_name

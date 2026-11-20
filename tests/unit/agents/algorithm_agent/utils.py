@@ -10,10 +10,17 @@ import xarray as xr
 
 from llm_agent.agents.algorithm_agent.interface import (
     AlgorithmProblemSpec,
+    GeometryVariable,
     OutputVariable,
     SpatioTemporalDataArrayVariable,
 )
 from llm_agent.model.dimension import Dimension
+
+
+def _geometry_input(name: str, description: str) -> GeometryVariable:
+    """A pre-resolved area-of-interest polygon, as the orchestration layer passes to this agent."""
+    return GeometryVariable(name=name, description=description, geometry_type="polygon")
+
 
 SST_DESCRIPTION = """\
 The SST (Sea Surface Temperature) variable is a 3-dimensional array of data representing global sea surface temperatures. The dimensions of this array are:
@@ -99,8 +106,10 @@ def make_test_data_array_spatiotemporal(
 test_input_vars = [
     SpatioTemporalDataArrayVariable(
         name="sst",
+        dataset_name="NOAA Coral Reef Watch Daily Global 5km Satellite Sea Surface Temperature (CoralTemp)",
         variable_type="DataArray",
         description="Sea Surface Temperature (SST)",
+        standard_name="sea_surface_temperature",
         dimensions=[
             Dimension(field_name="time", id="", cf_standard_name="time"),
             Dimension(field_name="lat", id="", cf_standard_name="latitude"),
@@ -135,27 +144,12 @@ test_params: dict[str, AlgoTestParams] = {
                     description="The mean value of the SST.",
                 )
             ],
-            user_provided_geometry=None,
         ),
         "dummy_solution": {
-            "thoughts": "Lorem ipsum.",
+            "analysis": "Lorem ipsum.",
             "pseudocode": "result = func(input)",
             "algorithm": {
                 "statements": [
-                    {
-                        "type": "VariableAssignment",
-                        "name": "sst_mean_dataarray",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "ReduceDataArray_LatLonTime",
-                                "data_array": {"type": "VariableReference", "name": "sst"},
-                                "op": "mean",
-                            },
-                        },
-                        "description": "Mean SST value for the Black Sea on June 01, 2024 as a DataArray",
-                    },
                     {
                         "type": "VariableAssignment",
                         "name": "sst_mean_scalar",
@@ -163,11 +157,9 @@ test_params: dict[str, AlgoTestParams] = {
                             "type": "FunctionCall",
                             "func": {
                                 "type": "Function",
-                                "func_name": "ZeroDimDataArrayToScalar",
-                                "data_array": {
-                                    "type": "VariableReference",
-                                    "name": "sst_mean_dataarray",
-                                },
+                                "func_name": "ReduceDataArray_LatLonTime",
+                                "data_array": {"type": "VariableReference", "name": "sst"},
+                                "op": "mean",
                             },
                         },
                         "description": "Mean SST value for the Black Sea on June 01, 2024 as a scalar",
@@ -181,7 +173,10 @@ test_params: dict[str, AlgoTestParams] = {
     "black_sea_mean": {
         "problem": AlgorithmProblemSpec(
             statement="What was the mean SST in the Black Sea on June 01, 2024.",
-            inputs_provided=test_input_vars,
+            inputs_provided=[
+                *test_input_vars,
+                _geometry_input("black_sea_polygon", "Black Sea"),
+            ],
             outputs_requested=[
                 OutputVariable(
                     name="sst_mean_scalar",
@@ -189,26 +184,12 @@ test_params: dict[str, AlgoTestParams] = {
                     description="The mean value of the SST.",
                 )
             ],
-            user_provided_geometry=None,
         ),
         "dummy_solution": {
-            "thoughts": "__thoughts__",
+            "analysis": "__analysis__",
             "pseudocode": "result = func(input)",
             "algorithm": {
                 "statements": [
-                    {
-                        "type": "VariableAssignment",
-                        "name": "black_sea_polygon",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "GeocodeNaturalLanguageDescription",
-                                "text": "Black Sea",
-                            },
-                        },
-                        "description": "Polygon representing the Black Sea area",
-                    },
                     {
                         "type": "VariableAssignment",
                         "name": "sst_filtered_time",
@@ -245,7 +226,7 @@ test_params: dict[str, AlgoTestParams] = {
                     },
                     {
                         "type": "VariableAssignment",
-                        "name": "sst_mean_dataarray",
+                        "name": "sst_mean_scalar",
                         "value": {
                             "type": "FunctionCall",
                             "func": {
@@ -256,22 +237,6 @@ test_params: dict[str, AlgoTestParams] = {
                                     "name": "sst_black_sea",
                                 },
                                 "op": "mean",
-                            },
-                        },
-                        "description": "Mean SST value for the Black Sea on June 01, 2024 as a DataArray",
-                    },
-                    {
-                        "type": "VariableAssignment",
-                        "name": "sst_mean_scalar",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "ZeroDimDataArrayToScalar",
-                                "data_array": {
-                                    "type": "VariableReference",
-                                    "name": "sst_mean_dataarray",
-                                },
                             },
                         },
                         "description": "Mean SST value for the Black Sea on June 01, 2024 as a scalar",
@@ -285,10 +250,13 @@ test_params: dict[str, AlgoTestParams] = {
     "time_series": {
         "problem": AlgorithmProblemSpec(
             statement="Show the daily average SST within the Chesapeake Bay "
-            "over the the months Jan 2024 and Feb 2024 as two separate time "
+            "over the the months Jan 2024 and March 2024 as two separate time "
             "series on the same plot. The x-axis should be agnostic of the "
             "year so that the two time series are on top of each other.",
-            inputs_provided=test_input_vars,
+            inputs_provided=[
+                *test_input_vars,
+                _geometry_input("chesapeake_bay", "Chesapeake Bay"),
+            ],
             outputs_requested=[
                 OutputVariable(
                     name="time_series_plot",
@@ -296,26 +264,12 @@ test_params: dict[str, AlgoTestParams] = {
                     description="The time series plot.",
                 )
             ],
-            user_provided_geometry=None,
         ),
         "dummy_solution": {
-            "thoughts": "__thoughts__",
+            "analysis": "__analysis__",
             "pseudocode": "result = func(input)",
             "algorithm": {
                 "statements": [
-                    {
-                        "type": "VariableAssignment",
-                        "name": "chesapeake_bay",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "GeocodeNaturalLanguageDescription",
-                                "text": "Chesapeake Bay",
-                            },
-                        },
-                        "description": "Polygon representing the Chesapeake Bay area",
-                    },
                     {
                         "type": "VariableAssignment",
                         "name": "sst_jan_2024",
@@ -332,17 +286,17 @@ test_params: dict[str, AlgoTestParams] = {
                     },
                     {
                         "type": "VariableAssignment",
-                        "name": "sst_feb_2024",
+                        "name": "sst_mar_2024",
                         "value": {
                             "type": "FunctionCall",
                             "func": {
                                 "type": "Function",
                                 "func_name": "SliceDataArray_LatLonTime",
                                 "data_array": {"type": "VariableReference", "name": "sst"},
-                                "dim_slices": {"time": ["2024-02-01", "2024-02-29"]},
+                                "dim_slices": {"time": ["2024-03-01", "2024-03-31"]},
                             },
                         },
-                        "description": "SST data for February 2024",
+                        "description": "SST data for March 2024",
                     },
                     {
                         "type": "VariableAssignment",
@@ -360,17 +314,17 @@ test_params: dict[str, AlgoTestParams] = {
                     },
                     {
                         "type": "VariableAssignment",
-                        "name": "sst_feb_2024_chesapeake",
+                        "name": "sst_mar_2024_chesapeake",
                         "value": {
                             "type": "FunctionCall",
                             "func": {
                                 "type": "Function",
                                 "func_name": "FilterDataArrayByPolygon",
-                                "data_array": {"type": "VariableReference", "name": "sst_feb_2024"},
+                                "data_array": {"type": "VariableReference", "name": "sst_mar_2024"},
                                 "polygon": {"type": "VariableReference", "name": "chesapeake_bay"},
                             },
                         },
-                        "description": "SST data for February 2024 in Chesapeake Bay",
+                        "description": "SST data for March 2024 in Chesapeake Bay",
                     },
                     {
                         "type": "VariableAssignment",
@@ -388,11 +342,11 @@ test_params: dict[str, AlgoTestParams] = {
                                 "time_unit": "dayofmonth",
                             },
                         },
-                        "description": "Daily average SST for January 2024 in Chesapeake Bay",
+                        "description": "Daily average SST for March 2024 in Chesapeake Bay",
                     },
                     {
                         "type": "VariableAssignment",
-                        "name": "sst_feb_2024_chesapeake_daily_avg",
+                        "name": "sst_mar_2024_chesapeake_daily_avg",
                         "value": {
                             "type": "FunctionCall",
                             "func": {
@@ -400,13 +354,13 @@ test_params: dict[str, AlgoTestParams] = {
                                 "func_name": "GroupByTimeAndReduceDataArray",
                                 "data_array": {
                                     "type": "VariableReference",
-                                    "name": "sst_feb_2024_chesapeake",
+                                    "name": "sst_mar_2024_chesapeake",
                                 },
                                 "op": "mean",
                                 "time_unit": "dayofmonth",
                             },
                         },
-                        "description": "Daily average SST for February 2024 in Chesapeake Bay",
+                        "description": "Daily average SST for March 2024 in Chesapeake Bay",
                     },
                     {
                         "type": "VariableAssignment",
@@ -415,25 +369,34 @@ test_params: dict[str, AlgoTestParams] = {
                             "type": "FunctionCall",
                             "func": {
                                 "type": "Function",
-                                "func_name": "PlotDataArraysAsTimeSeries",
-                                "data_arrays": [
-                                    {
-                                        "type": "VariableReference",
-                                        "name": "sst_jan_2024_chesapeake_daily_avg",
+                                "func_name": "MakePlot",
+                                "plot_spec": {
+                                    "spec_name": "MultiLinePlotSpec",
+                                    "specs": [
+                                        {
+                                            "spec_name": "LinePlotSpec",
+                                            "data_array": {
+                                                "type": "VariableReference",
+                                                "name": "sst_jan_2024_chesapeake_daily_avg",
+                                            },
+                                        },
+                                        {
+                                            "spec_name": "LinePlotSpec",
+                                            "data_array": {
+                                                "type": "VariableReference",
+                                                "name": "sst_mar_2024_chesapeake_daily_avg",
+                                            },
+                                        },
+                                    ],
+                                    "annotation": {
+                                        "title": "Daily Average SST in Chesapeake Bay: Mar 2024 vs Mar 2024",
+                                        "xlabel": "Day of Month",
+                                        "ylabel": "Daily Average SST (°C)",
                                     },
-                                    {
-                                        "type": "VariableReference",
-                                        "name": "sst_feb_2024_chesapeake_daily_avg",
-                                    },
-                                ],
-                                "labels": [
-                                    "sst_jan_2024_chesapeake_daily_avg",
-                                    "sst_feb_2024_chesapeake_daily_avg",
-                                ],
-                                "title": "Daily Average SST in Chesapeake Bay: Jan 2024 vs Feb 2024",
+                                },
                             },
                         },
-                        "description": "Time series plot of daily average SST in Chesapeake Bay for Jan 2024 and Feb 2024",
+                        "description": "Time series plot of daily average SST in Chesapeake Bay for Mar 2024 and Mar 2024",
                     },
                 ],
                 "output_variables": [{"type": "VariableReference", "name": "time_series_plot"}],
@@ -446,7 +409,12 @@ test_params: dict[str, AlgoTestParams] = {
             statement="Draw a bar chart comparing the max SST's in "
             "Chesapeake Bay, Delaware Bay, and San Pablo Bay in the month of "
             "June 2024.",
-            inputs_provided=test_input_vars,
+            inputs_provided=[
+                *test_input_vars,
+                _geometry_input("chesapeake_bay", "Chesapeake Bay"),
+                _geometry_input("delaware_bay", "Delaware Bay"),
+                _geometry_input("san_pablo_bay", "San Pablo Bay"),
+            ],
             outputs_requested=[
                 OutputVariable(
                     name="bar_plot",
@@ -454,52 +422,12 @@ test_params: dict[str, AlgoTestParams] = {
                     description="The bar plot.",
                 )
             ],
-            user_provided_geometry=None,
         ),
         "dummy_solution": {
-            "thoughts": "__thoughts__",
+            "analysis": "__analysis__",
             "pseudocode": "result = func(input)",
             "algorithm": {
                 "statements": [
-                    {
-                        "type": "VariableAssignment",
-                        "name": "chesapeake_bay",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "GeocodeNaturalLanguageDescription",
-                                "text": "Chesapeake Bay",
-                            },
-                        },
-                        "description": "Polygon representing Chesapeake Bay",
-                    },
-                    {
-                        "type": "VariableAssignment",
-                        "name": "delaware_bay",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "GeocodeNaturalLanguageDescription",
-                                "text": "Delaware Bay",
-                            },
-                        },
-                        "description": "Polygon representing Delaware Bay",
-                    },
-                    {
-                        "type": "VariableAssignment",
-                        "name": "san_pablo_bay",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "GeocodeNaturalLanguageDescription",
-                                "text": "San Pablo Bay",
-                            },
-                        },
-                        "description": "Polygon representing San Pablo Bay",
-                    },
                     {
                         "type": "VariableAssignment",
                         "name": "sst_june_2024",
@@ -584,22 +512,6 @@ test_params: dict[str, AlgoTestParams] = {
                     },
                     {
                         "type": "VariableAssignment",
-                        "name": "chesapeake_max_sst_scalar",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "ZeroDimDataArrayToScalar",
-                                "data_array": {
-                                    "type": "VariableReference",
-                                    "name": "chesapeake_max_sst",
-                                },
-                            },
-                        },
-                        "description": "Maximum SST for Chesapeake Bay in June 2024",
-                    },
-                    {
-                        "type": "VariableAssignment",
                         "name": "delaware_max_sst",
                         "value": {
                             "type": "FunctionCall",
@@ -608,22 +520,6 @@ test_params: dict[str, AlgoTestParams] = {
                                 "func_name": "ReduceDataArray_LatLonTime",
                                 "data_array": {"type": "VariableReference", "name": "delaware_sst"},
                                 "op": "max",
-                            },
-                        },
-                        "description": "Maximum SST for Delaware Bay in June 2024",
-                    },
-                    {
-                        "type": "VariableAssignment",
-                        "name": "delaware_max_sst_scalar",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "ZeroDimDataArrayToScalar",
-                                "data_array": {
-                                    "type": "VariableReference",
-                                    "name": "delaware_max_sst",
-                                },
                             },
                         },
                         "description": "Maximum SST for Delaware Bay in June 2024",
@@ -647,44 +543,33 @@ test_params: dict[str, AlgoTestParams] = {
                     },
                     {
                         "type": "VariableAssignment",
-                        "name": "san_pablo_max_sst_scalar",
-                        "value": {
-                            "type": "FunctionCall",
-                            "func": {
-                                "type": "Function",
-                                "func_name": "ZeroDimDataArrayToScalar",
-                                "data_array": {
-                                    "type": "VariableReference",
-                                    "name": "san_pablo_max_sst",
-                                },
-                            },
-                        },
-                        "description": "Maximum SST for San Pablo Bay in June 2024",
-                    },
-                    {
-                        "type": "VariableAssignment",
                         "name": "bar_plot",
                         "value": {
                             "type": "FunctionCall",
                             "func": {
                                 "type": "Function",
-                                "func_name": "PlotBarChart",
-                                "labels": ["Chesapeake Bay", "Delaware Bay", "San Pablo Bay"],
-                                "heights": [
-                                    {
-                                        "type": "VariableReference",
-                                        "name": "chesapeake_max_sst_scalar",
+                                "func_name": "MakePlot",
+                                "plot_spec": {
+                                    "spec_name": "BarPlotSpec",
+                                    "labels": ["Chesapeake Bay", "Delaware Bay", "San Pablo Bay"],
+                                    "heights": [
+                                        {
+                                            "type": "VariableReference",
+                                            "name": "chesapeake_max_sst",
+                                        },
+                                        {
+                                            "type": "VariableReference",
+                                            "name": "delaware_max_sst",
+                                        },
+                                        {
+                                            "type": "VariableReference",
+                                            "name": "san_pablo_max_sst",
+                                        },
+                                    ],
+                                    "annotation": {
+                                        "title": "Maximum SST in June 2024 for Selected Bays"
                                     },
-                                    {
-                                        "type": "VariableReference",
-                                        "name": "delaware_max_sst_scalar",
-                                    },
-                                    {
-                                        "type": "VariableReference",
-                                        "name": "san_pablo_max_sst_scalar",
-                                    },
-                                ],
-                                "title": "Maximum SST in June 2024 for Selected Bays",
+                                },
                             },
                         },
                         "description": "Bar chart comparing max SSTs in Chesapeake Bay, Delaware Bay, and San Pablo Bay in June 2024",
@@ -702,14 +587,13 @@ test_params: dict[str, AlgoTestParams] = {
             outputs_requested=[
                 OutputVariable(
                     name="plot",
-                    variable_type="raster_plot",
+                    variable_type="plot_grid",
                     description="The requested plot.",
                 )
             ],
-            user_provided_geometry=None,
         ),
         "dummy_solution": {
-            "thoughts": "__thoughts__",
+            "analysis": "__analysis__",
             "pseudocode": "result = func(input)",
             "algorithm": {
                 "statements": [
@@ -748,13 +632,27 @@ test_params: dict[str, AlgoTestParams] = {
                             "type": "FunctionCall",
                             "func": {
                                 "type": "Function",
-                                "func_name": "PlotDataArraysAsRaster",
-                                "data_arrays": [
-                                    {"type": "VariableReference", "name": "sst_jan_2024"},
-                                    {"type": "VariableReference", "name": "sst_aug_2024"},
-                                ],
-                                "subplot_grid_shape": [1, 2],
-                                "title": "SST Maps for Jan 1, 2024 and Aug 1, 2024",
+                                "func_name": "MakePlot",
+                                "plot_spec": {
+                                    "spec_name": "PlotGridSpec",
+                                    "ncols": 2,
+                                    "subplot_specs": [
+                                        {
+                                            "spec_name": "SSTPlotSpec",
+                                            "sst_data_array": {
+                                                "type": "VariableReference",
+                                                "name": "sst_jan_2024",
+                                            },
+                                        },
+                                        {
+                                            "spec_name": "SSTPlotSpec",
+                                            "sst_data_array": {
+                                                "type": "VariableReference",
+                                                "name": "sst_aug_2024",
+                                            },
+                                        },
+                                    ],
+                                },
                             },
                         },
                         "description": "SST for Jan",

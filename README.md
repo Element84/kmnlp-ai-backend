@@ -5,9 +5,8 @@ LLM-related code.
 
 1. Checkout the code.
 1. Create/activate your Python environment of choice.
-1. Install uv: `pip install uv`.
-1. Install dependencies: `uv pip install -r pyproject.toml`.
-1. Install dev dependencies: `uv pip install -r pyproject.toml --extra dev`.
+1. Install uv, let's say with pip: `pip install uv`.
+1. Install dependencies: `uv sync --all-extras` (or `pip install -r requirements.txt` if you prefer).
 1. Run `pre-commit install` to install pre-commit hooks.
 1. Configure your editor for realtime linting:
 	- For VS Code:

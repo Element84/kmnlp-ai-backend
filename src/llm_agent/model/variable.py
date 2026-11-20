@@ -8,14 +8,20 @@ class Variable(BaseModel):
 
     id: str = Field(description="Variable ID.")
     name: str = Field(description=("Variable name."))
+    dataset_name: str = Field(description="Name of the dataset the variable belongs to.")
     field_name: str = Field(
         description=(
             "The machine-readable name of a field or variable as used in data "
             "storage and query systems."
         )
     )
-    description: str | None = Field(description="Variable description.")
-    units: str | None = Field(description="Units of the data.")
+    standard_name: str | None = Field(
+        default=None,
+        description="The CF standard name of the variable, if applicable. "
+        "This is a common naming convention for climate and forecast variables.",
+    )
+    description: str | None = Field(default=None, description="Variable description.")
+    units: str | None = Field(default=None, description="Units of the data.")
     dimensions: list[Dimension] = Field(description="Dimensions of the data.")
 
     def is_spatiotemporal(self) -> bool:

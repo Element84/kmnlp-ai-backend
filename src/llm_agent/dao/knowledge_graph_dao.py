@@ -1,10 +1,12 @@
+# ruff: noqa: N815
+
 from collections.abc import Sequence
 from datetime import datetime
+from functools import cached_property
 from importlib.resources import as_file
 from importlib.resources.abc import Traversable
 from itertools import groupby
 from os.path import basename, join
-from string import Template
 from typing import TYPE_CHECKING, cast
 
 from langfuse import observe  # type: ignore[reportUnknownVariableType]
@@ -30,7 +32,7 @@ WHERE {
 }
 """
 
-FETCH_DATASETS_QUERY = Template(
+FETCH_DATASETS_QUERY = prepareQuery(
     """
 PREFIX : <http://kmnlp-demo.noaa.gov/>
 PREFIX dcat: <http://www.w3.org/ns/dcat#>
@@ -41,7 +43,7 @@ PREFIX schema: <https://schema.org/>
 
 SELECT
     ?dataset_id
-    ?label
+    ?datasetLabel
     ?description
     ?landingPage
     ?sourceUri
@@ -52,16 +54,14 @@ SELECT
     ?variable_id
     ?variableName
     ?variableFieldName
+    ?variableStandardName
     ?variableDescription
     ?variableUnits
     (GROUP_CONCAT(?dim_id; SEPARATOR=";") AS ?dimIds)
     (GROUP_CONCAT(?dimFieldName; SEPARATOR=";") AS ?dimFieldNames)
 WHERE {
-    ${values_clause}
-
-    ?dataset a schema:Dataset ;
-        a dcat:Dataset ;
-        rdfs:label ?label ;
+    ?dataset a dcat:Dataset ;
+        rdfs:label ?datasetLabel ;
         dcat:distribution ?distribution ;
         dcat:startDate ?startDate  ;
         dcat:endDate ?endDate  ;
@@ -76,18 +76,18 @@ WHERE {
     OPTIONAL { ?dataset schema:url ?landingPage } .
     OPTIONAL { ?dataset dcat:temporalResolution ?temporalResolution } .
 
-    ?dataStructDef a qb:DataStructureDefinition ;
-        qb:component ?dataStructDefComp .
+    ?dataStructDef qb:component ?dataStructDefComp .
     ?dataStructDefComp qb:measure ?variable .
 
-    ?variable a qb:MeasureProperty ;
-        schema:name ?variableName ;
+    ?variable rdfs:label ?variableLabel ;
         schema:alternateName ?variableFieldName .
 
     ?dataStructDef qb:component ?dataStructDefCompDim .
     ?dataStructDefCompDim qb:dimension ?dim ;
         :field_name ?dimFieldName .
 
+    OPTIONAL { ?variable schema:name ?variableName } .
+    OPTIONAL { ?variable :cf_standard_name ?variableStandardName } .
     OPTIONAL { ?variable schema:description ?variableDescription } .
     OPTIONAL { ?variable schema:unitText ?variableUnits } .
 
@@ -98,12 +98,17 @@ WHERE {
 
     FILTER (
         !BOUND(?pattern) ||
-        (
-            regex(?label, ?pattern, "i") ||
-            regex(?description, ?pattern, "i") ||
-            regex(?variableName, ?pattern, "i") ||
-            regex(?variableFieldName, ?pattern, "i") ||
-            (!BOUND(?variableDescription) || regex(?variableDescription, ?pattern, "i"))
+        regex(
+            CONCAT(
+                ?datasetLabel, " ",
+                ?description, " ",
+                ?variableName, " ",
+                ?variableLabel, " ",
+                ?variableFieldName, " ",
+                IF(BOUND(?variableStandardName), STR(?variableStandardName), ""), " ",
+                IF(BOUND(?variableDescription), ?variableDescription, "")),
+            ?pattern,
+            "is"
         )
     ) .
 
@@ -116,6 +121,7 @@ ORDER BY ?dataset_id ?variable_id
 """.replace("__KG_NAMESPACE__", KG_NAMESPACE)
 )
 
+
 FETCH_VARIABLES_QUERY = prepareQuery(
     """
 PREFIX : <http://kmnlp-demo.noaa.gov/>
@@ -126,31 +132,34 @@ PREFIX schema: <https://schema.org/>
 
 SELECT
     ?dataset_id
+    ?datasetLabel
     ?variable_id
     ?variableName
     ?variableFieldName
+    ?variableStandardName
     ?variableDescription
     ?variableUnits
     (GROUP_CONCAT(?dim_id; SEPARATOR=";") AS ?dimIds)
     (GROUP_CONCAT(?dimFieldName; SEPARATOR=";") AS ?dimFieldNames)
 WHERE {
-    ?dataset a schema:Dataset ;
-        a dcat:Dataset ;
+    ?dataset a dcat:Dataset ;
+        rdfs:label ?datasetLabel ;
         schema:variableMeasured ?variable ;
+        dcterms:description ?datasetDescription ;
         qb:structure ?dataStructDef .
 
-    ?dataStructDef a qb:DataStructureDefinition ;
-        qb:component ?dataStructDefComp .
+    ?dataStructDef qb:component ?dataStructDefComp .
     ?dataStructDefComp qb:measure ?variable .
 
     ?dataStructDef qb:component ?dataStructDefCompDim .
     ?dataStructDefCompDim qb:dimension ?dim ;
         :field_name ?dimFieldName .
 
-    ?variable a qb:MeasureProperty ;
-        schema:name ?variableName ;
+    ?variable rdfs:label ?variableLabel ;
         schema:alternateName ?variableFieldName .
 
+    OPTIONAL { ?variable schema:name ?variableName } .
+    OPTIONAL { ?variable :cf_standard_name ?variableStandardName } .
     OPTIONAL { ?variable schema:description ?variableDescription } .
     OPTIONAL { ?variable schema:unitText ?variableUnits } .
 
@@ -161,11 +170,16 @@ WHERE {
 
     FILTER (
         !BOUND(?pattern) ||
-        (
-            regex(?datasetDescription, ?pattern, "i") ||
-            regex(?variableName, ?pattern, "i") ||
-            regex(?variableFieldName, ?pattern, "i") ||
-            (!BOUND(?variableDescription) || regex(?variableDescription, ?pattern, "i"))
+        regex(
+            CONCAT(
+                ?datasetDescription, " ",
+                ?variableName, " ",
+                ?variableLabel, " ",
+                ?variableFieldName, " ",
+                IF(BOUND(?variableStandardName), STR(?variableStandardName), ""), " ",
+                IF(BOUND(?variableDescription), ?variableDescription, "")),
+            ?pattern,
+            "is"
         )
     ) .
 
@@ -185,7 +199,7 @@ PREFIX schema: <https://schema.org/>
 
 SELECT
     (STRAFTER(STR(?dataset), "__KG_NAMESPACE__") AS ?dataset_id)
-    ?label
+    ?datasetLabel
     ?description
     ?landingPage
     ?sourceUri
@@ -197,7 +211,7 @@ WHERE {
     ?dataset a schema:Dataset ;
         a dcat:Dataset ;
         schema:variableMeasured ?variable ;
-        rdfs:label ?label ;
+        rdfs:label ?datasetLabel ;
         dcat:distribution ?distribution ;
         dcat:startDate ?startDate  ;
         dcat:endDate ?endDate  .
@@ -243,30 +257,32 @@ class _ResultRowModel(BaseModel):
 
 class _DatasetResultRow(_ResultRowModel):
     dataset_id: str
-    label: str
+    datasetLabel: str
     description: str
-    landingPage: str | None = None  # noqa: N815
-    sourceUri: str  # noqa: N815
-    sourceType: str  # noqa: N815
-    startDate: str  # noqa: N815
-    endDate: str  # noqa: N815
-    temporalResolution: str | None = None  # noqa: N815
+    landingPage: str | None = None
+    sourceUri: str
+    sourceType: str
+    startDate: str
+    endDate: str
+    temporalResolution: str | None = None
 
 
 class _VariableResultRow(_ResultRowModel):
     variable_id: str
-    variableName: str  # noqa: N815
-    variableFieldName: str  # noqa: N815
-    variableDescription: str | None = None  # noqa: N815
-    variableUnits: str | None = None  # noqa: N815
-    dimIds: str  # semicolon-separated list of dimension IDs# noqa: N815
-    dimFieldNames: str  # semicolon-separated list of dimension field names# noqa: N815
+    variableName: str | None = None
+    datasetLabel: str
+    variableFieldName: str
+    variableStandardName: str | None = None
+    variableDescription: str | None = None
+    variableUnits: str | None = None
+    dimIds: str  # semicolon-separated list of dimension IDs
+    dimFieldNames: str  # semicolon-separated list of dimension field names
 
 
 class _CanonicalDimensionResultRow(_ResultRowModel):
     dimension_id: str
-    cfStandardName: str | None = None  # noqa: N815
-    alternateNames: str | None = None  # noqa: N815
+    cfStandardName: str | None = None
+    alternateNames: str | None = None
 
 
 def _parse_datasets_query_result_row(
@@ -276,7 +292,7 @@ def _parse_datasets_query_result_row(
     return Dataset(
         id=row.dataset_id,
         source=DatasetSource(uri=row.sourceUri, format=basename(row.sourceType)),  # pyright: ignore[reportArgumentType]
-        label=row.label,
+        label=row.datasetLabel,
         description=row.description,
         landing_page=row.landingPage,
         # rely on pydantic to implicitly parse these to datetimes
@@ -304,9 +320,11 @@ def _parse_variables_query_result_row(
     ]
     return Variable(
         id=row.variable_id,
-        name=row.variableName,
+        name=row.variableName or row.variableFieldName,
+        dataset_name=row.datasetLabel,
         field_name=row.variableFieldName,
         description=row.variableDescription,
+        standard_name=row.variableStandardName,
         units=row.variableUnits,
         dimensions=dims,
     )
@@ -390,17 +408,10 @@ class KnowledgeGraphDAO:
         Returns:
             A list of datasets satisfying the provided criteria.
         """
-        if ids is not None and len(ids) > 0:
-            # Convert the list into a SPARQL-compatible VALUES clause
-            # Format: VALUES ?dataset { <iri1> <iri2> ... }
-            iris = [self.id_to_iri(id_) for id_ in ids]
-            iris_formatted = " ".join(f"<{iri}>" for iri in iris)
-            values_clause = f"VALUES ?dataset {{ {iris_formatted} }}"
-        else:
-            values_clause = ""
-        query_str = FETCH_DATASETS_QUERY.safe_substitute(values_clause=values_clause)
+        if ids is not None and len(ids) == 0:
+            return []
 
-        bindings: dict[str, RDFLiteral] | None = {
+        bindings: dict[str, RDFLiteral | URIRef] = {
             k: RDFLiteral(v)
             for k, v in {
                 "filterTimeRangeStart": start_time,
@@ -410,18 +421,27 @@ class KnowledgeGraphDAO:
             if v is not None
         }
 
-        dimensions = self.get_canonical_dimensions()
-        dim_id_to_dim = {dim.id: dim for dim in dimensions}
+        if ids is not None:
+            # Use initBindings per ID for efficient lookup (avoids slow VALUES clause)
+            all_rows: list[dict[str, object]] = []
+            for id_ in ids:
+                id_bindings = {**bindings, "dataset": URIRef(self.id_to_iri(id_))}
+                rows = self.graph.query(FETCH_DATASETS_QUERY, initBindings=id_bindings)
+                all_rows.extend(cast("ResultRow", row).asdict() for row in rows)  # type: ignore[reportArgumentType]
+        else:
+            result = self.graph.query(
+                FETCH_DATASETS_QUERY, initBindings=bindings if len(bindings) > 0 else None
+            )
+            all_rows = [cast("ResultRow", row).asdict() for row in result]  # type: ignore[reportAssignmentType]
 
-        rows = self.graph.query(query_str, initBindings=bindings if len(bindings) > 0 else None)
-        grouped_rows = groupby(rows, key=lambda r: cast("ResultRow", r).dataset_id)
+        grouped_rows = groupby(all_rows, key=lambda r: r["dataset_id"])
         datasets: list[Dataset] = []
         for _, group_rows in grouped_rows:
-            group_row_dicts = [cast("ResultRow", row).asdict() for row in group_rows]
+            group_row_dicts = list(group_rows)
             first_row = group_row_dicts[0]
             ds_vars = [
                 _parse_variables_query_result_row(
-                    _VariableResultRow.model_validate(row), dim_id_to_dim
+                    _VariableResultRow.model_validate(row), self.canonical_dimensions
                 )
                 for row in group_row_dicts
             ]
@@ -432,20 +452,21 @@ class KnowledgeGraphDAO:
 
         return datasets
 
+    @cached_property
     @observe(as_type="retriever")
-    def get_canonical_dimensions(self) -> list[CanonicalDimension]:
+    def canonical_dimensions(self) -> dict[str, CanonicalDimension]:
         """Fetch all dimensions represented in the knowledge graph.
 
         Returns:
-            A list of dimensions.
+            A dictionary mapping dimension IDs to dimensions.
         """
-        dimensions: list[CanonicalDimension] = []
+        dimensions: dict[str, CanonicalDimension] = {}
         for row in self.graph.query(FETCH_CANONICAL_DIMENSIONS_QUERY):
             row = cast("ResultRow", row)
             dim = _parse_canonical_dimensions_query_result_row(
                 _CanonicalDimensionResultRow.model_validate(row.asdict())
             )
-            dimensions.append(dim)
+            dimensions[dim.id] = dim
         return dimensions
 
     @observe(as_type="retriever")
@@ -471,11 +492,8 @@ class KnowledgeGraphDAO:
         except StopIteration:
             return None
 
-        dimensions = self.get_canonical_dimensions()
-        dim_id_to_dim = {dim.id: dim for dim in dimensions}
-
         return _parse_variables_query_result_row(
-            _VariableResultRow.model_validate(first_result_row.asdict()), dim_id_to_dim
+            _VariableResultRow.model_validate(first_result_row.asdict()), self.canonical_dimensions
         )
 
     @observe(as_type="retriever")
@@ -507,9 +525,6 @@ class KnowledgeGraphDAO:
             _DatasetResultRow.model_validate(first_result_row.asdict())
         )
 
-        dimensions = self.get_canonical_dimensions()
-        dim_id_to_dim = {dim.id: dim for dim in dimensions}
-
         # populate variables
         ds_vars_results = self.graph.query(
             FETCH_VARIABLES_QUERY, initBindings={"dataset": URIRef(self.id_to_iri(ds.id))}
@@ -518,7 +533,7 @@ class KnowledgeGraphDAO:
             row = cast("ResultRow", row)
             ds.variables.append(
                 _parse_variables_query_result_row(
-                    _VariableResultRow.model_validate(row.asdict()), dim_id_to_dim
+                    _VariableResultRow.model_validate(row.asdict()), self.canonical_dimensions
                 )
             )
 

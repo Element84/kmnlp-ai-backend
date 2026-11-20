@@ -17,6 +17,7 @@ from llm_agent.agents.scientific_python_agent.utils.agent_code_utils import (
     min_coords,
     polygon_to_mask,
 )
+from llm_agent.utils.dask import SPATIAL_VALID_FRACTION_ATTR
 
 place_lookup = CannedPlaceLookup()
 
@@ -52,7 +53,7 @@ def test_filter_data_array():
     assert da_filtered.shape == (10, 6, 2)
 
 
-def test_max_coords():
+async def test_max_coords():
     da = build_test_data_array()
     da.data[2, 1, 2] = 100.0
     expected_output = {
@@ -61,10 +62,10 @@ def test_max_coords():
         "lon": -100.0,
         "value": 100.0,
     }
-    assert max_coords(da) == expected_output
+    assert await max_coords(da) == expected_output
 
 
-def test_min_coords():
+async def test_min_coords():
     da = build_test_data_array()
     da.data[3, 4, 1] = -100
     expected_output = {
@@ -73,7 +74,7 @@ def test_min_coords():
         "lon": -140.0,
         "value": -100.0,
     }
-    assert min_coords(da) == expected_output
+    assert await min_coords(da) == expected_output
 
 
 def test_geographic_coords_to_decimal_coords():
@@ -124,8 +125,20 @@ def test_mask_data_array_with_polygon_2d():
     assert result_cropped.sizes["lon"] <= w
 
 
+def test_mask_data_array_with_polygon_sets_valid_fraction():
+    da = build_test_data_array().isel(time=0)
+    polygon = box(-60, 10, 60, 50)  # covers only part of the grid
+    result = mask_data_array_with_polygon(da, polygon)
+
+    fraction = result.attrs[SPATIAL_VALID_FRACTION_ATTR]
+    assert 0.0 < fraction < 1.0
+    # Matches the fraction of lat/lon cells the polygon actually keeps.
+    mask = polygon_to_mask(polygon, da)
+    assert np.isclose(fraction, float(mask.mean()))
+
+
 # this test takes a few seconds to complete because of the exponential backoff
-def test_geocode_natural_language_description_retry():
+async def test_geocode_natural_language_description_retry():
     with (
         patch(
             "llm_agent.agents.scientific_python_agent.utils.agent_code_utils.extract_geometry_from_text",
@@ -141,13 +154,13 @@ def test_geocode_natural_language_description_retry():
             return_value=Mock(),
         ),
     ):
-        result = geocode_natural_language_description(place_lookup, "")
+        result = await geocode_natural_language_description(place_lookup, Mock(), "")
         assert result == box(-10, -10, 10, 10)
         assert mock_func.call_count == 3
 
 
 # this test takes a few seconds to complete because of the exponential backoff
-def test_geocode_natural_language_description_max_retries():
+async def test_geocode_natural_language_description_max_retries():
     with (
         patch(
             "llm_agent.agents.scientific_python_agent.utils.agent_code_utils.extract_geometry_from_text",
@@ -160,5 +173,5 @@ def test_geocode_natural_language_description_max_retries():
         ),
     ):
         with pytest.raises(ReadTimeout):
-            _ = geocode_natural_language_description(place_lookup, "")
+            _ = await geocode_natural_language_description(place_lookup, Mock(), "")
         assert mock_func.call_count == 3

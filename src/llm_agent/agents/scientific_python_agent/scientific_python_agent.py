@@ -3,13 +3,10 @@ from collections.abc import Callable
 from string import Template
 from typing import Any
 
-from e84_geoai_common.llm.core import (
-    LLM,
-    Agent,
-    LLMInferenceConfig,
-    LLMUserMessage,
-)
-from e84_geoai_common.util import timed_function
+from langfuse import observe  # type: ignore[reportUnknownVariableType]
+from pydantic_ai import Agent, TextOutput
+from pydantic_ai.models import Model
+from pydantic_ai.models.bedrock import BedrockModelSettings
 
 from llm_agent.agents.scientific_python_agent.utils import (
     ExecOutput,
@@ -29,7 +26,6 @@ from llm_agent.agents.scientific_python_agent.utils.misc import (
     get_function_def,
     parse_code_solution,
 )
-from llm_agent.context import LLMAgentContext
 from llm_agent.utils.utils import get_current_date
 
 log = logging.getLogger(__name__)
@@ -119,32 +115,35 @@ ${query}
 """)
 
 
-class ScientificPythonAgent(Agent[LLMAgentContext]):
-    """Writes scientific Python code to extract insights from data."""
+class ScientificPythonAgent:
+    """Writes scientific Python code to extract insights from data.
+
+    Legacy agent, lightly migrated to wrap a Pydantic AI agent. The model emits a
+    free-form text response containing ``<thoughts>``/``<code>``/``<explanation>``
+    blocks, which ``parse_code_solution`` turns into an ``LLMCodeSolution`` via a
+    ``TextOutput`` output function.
+    """
 
     utils: list[Callable[..., Any]] = DEFAULT_UTILS
 
     def __init__(
         self,
-        llm: "LLM",
+        model: Model,
         *,
-        inference_cfg: LLMInferenceConfig | None = None,
         setup_code: str = "",
         setup_output: str | ExecOutput = "",
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> None:
         """Constructor.
 
         Args:
-            llm (LLM): An LLM instance.
-            inference_cfg (LLMInferenceConfig | None): Inference config.
-                Defaults to None.
-            setup_code (str): Code that sets up the Python environment where
-                the LLM's code will be run. Defaults to "".
-            setup_output (str | ExecOutput): Output from running setup_code.
-                Defaults to "".
+            model: The Pydantic AI model to drive the agent. Build one with
+                ``llm_agent.model_factory.make_bedrock_model``.
+            setup_code: Code that sets up the Python environment where the LLM's
+                code will be run. Defaults to "".
+            setup_output: Output from running ``setup_code``. Defaults to "".
+            max_output_tokens: Maximum number of output tokens.
         """
-        self.llm = llm
-        self.tools = []
         self.setup_code = setup_code
         self.setup_output = str(setup_output)
         utils_str = "\n\n".join(get_function_def(func) for func in self.utils)
@@ -156,36 +155,23 @@ class ScientificPythonAgent(Agent[LLMAgentContext]):
             current_date=get_current_date(),
         )
         self._prompt_template = SCIENTIFIC_PYTHON_PROMPT_TEMPLATE
-        if inference_cfg is not None:
-            if inference_cfg.system_prompt is not None:
-                msg = "system_prompt should not be set in the provided LLMInferenceConfig"
-                raise ValueError(msg)
-            inference_cfg = inference_cfg.model_copy(
-                update={
-                    "system_prompt": self.system_prompt,
-                    "json_mode": True,
-                }
-            )
-        if inference_cfg is None:
-            inference_cfg = LLMInferenceConfig(
-                system_prompt=self.system_prompt,
+        self._agent = Agent(
+            model,
+            output_type=TextOutput(parse_code_solution),
+            instructions=self.system_prompt,
+            model_settings=BedrockModelSettings(
                 temperature=0,
-                json_mode=True,
-                max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-            )
-        self.inference_cfg = inference_cfg
+                max_tokens=max_output_tokens,
+                bedrock_cache_instructions=True,
+            ),
+        )
 
-    @timed_function()
-    def run(self, query: str) -> LLMCodeSolution:
+    @observe(as_type="agent", name=__name__)
+    async def run(self, query: str) -> LLMCodeSolution:
         """Translate query into Python code."""
         prompt_str = self._prompt_template.substitute(query=query)
-        response = self.llm.prompt(
-            messages=[LLMUserMessage(content=prompt_str)],
-            inference_cfg=self.inference_cfg,
-        )
-        text = response.to_text_only()
-        llm_solution = parse_code_solution(text)
-        return llm_solution
+        result = await self._agent.run(prompt_str)
+        return result.output
 
     @property
     def prompt_template(self) -> str:

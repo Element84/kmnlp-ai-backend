@@ -3,6 +3,7 @@ import os
 from typing import cast
 
 import pytest
+import pytest_asyncio
 from dask.distributed import Client, LocalCluster
 
 log = logging.getLogger(__name__)
@@ -19,8 +20,8 @@ def dask_scheduler_address() -> str:  # pyright: ignore[reportInvalidTypeForm]
         yield dask_scheduler_address  # pyright: ignore[reportReturnType]
 
 
-@pytest.fixture
-def dask_client(dask_scheduler_address: str) -> Client:  # pyright: ignore[reportInvalidTypeForm]
+@pytest_asyncio.fixture
+async def dask_client(dask_scheduler_address: str) -> Client:  # pyright: ignore[reportInvalidTypeForm]
     # In pytest fixtures, yielding instead of returning allows adding teardown code after the yield.
-    with Client(dask_scheduler_address, asynchronous=False) as dask_client:
+    async with Client(dask_scheduler_address, asynchronous=True) as dask_client:
         yield dask_client  # pyright: ignore[reportReturnType]

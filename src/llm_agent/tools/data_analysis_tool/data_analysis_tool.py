@@ -1,52 +1,57 @@
-import base64
-import io
 import logging
-from typing import Any, Self
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 import xarray as xr
-from anyio import from_thread, to_thread
-from e84_geoai_common.llm.core import Base64ImageContent, JSONContent, LLMToolUseContent
-from e84_geoai_common.llm.models.claude import BedrockClaudeLLM
-from e84_geoai_common.util import timed_function
-from geojson_pydantic.geometries import Geometry
+from anyio import to_thread
+from icechunk import Credentials, Repository, S3Credentials, s3_storage
 from langfuse import observe  # type: ignore[reportUnknownVariableType]
-from matplotlib import pyplot as plt
-from matplotlib.figure import Figure
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai import AgentRunResultEvent, RunContext
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.messages import (
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
+    ThinkingPart,
+    ThinkingPartDelta,
+)
+from pydantic_ai.models import Model
 from rich.pretty import pretty_repr
 
-from llm_agent import ALGORITHM_AGENT_DEFAULT_LLM_MODEL_ID
 from llm_agent.agents.algorithm_agent.algorithm.base import (
     BaseFunctionCall,
     make_function_call_model,
 )
-from llm_agent.agents.algorithm_agent.algorithm.exec import (
+from llm_agent.agents.algorithm_agent.algorithm.exec.base import (
     AlgorithmExecutionError,
+    ExecutionConfig,
     execute_algorithm,
 )
-from llm_agent.agents.algorithm_agent.algorithm_agent import AlgorithmAgent
+from llm_agent.agents.algorithm_agent.algorithm_agent import (
+    AlgorithmAgent,
+    AlgorithmAgentStreamEvent,
+)
 from llm_agent.agents.algorithm_agent.interface import (
     AlgorithmProblemSpec,
     AlgorithmSolutionSpec,
+    DataArrayVariable,
+    GeometryVariable,
     InputVariable,
     OutputVariable,
     input_variable_from_model,
     input_vars_to_function_set,
 )
-from llm_agent.agents.scientific_python_agent.utils.agent_code_utils import (
-    DaskComputeError,
-    DataSizeTooLargeError,
-    compute,
-)
-from llm_agent.agents.tool_only_agent import MaxAllowedToolCallsExceededError
-from llm_agent.context import ToolCallContext
+from llm_agent.context import AgentDeps, ToolCallContext
 from llm_agent.dao.knowledge_graph_dao import KnowledgeGraphDAO
 from llm_agent.model.dataset import DatasetSource
-from llm_agent.tools.data_analysis_tool.utils import normalized_data_array
-from llm_agent.tools.llm_tool_input import LLMToolInput
-from llm_agent.tools.llm_tool_typed import ErrorResponse, LLMToolTyped, ToolOutput
-from llm_agent.transformers.geotiff_transformers import GeoTIFFRef
-from llm_agent.utils.utils import EnrichedLLMToolResultContent, PrivateAttr
+from llm_agent.tools.agent_tool import AgentTool, ErrorResponse, ToolInput
+from llm_agent.tools.data_analysis_tool.types import AnimationRef, GeometryRef, GeoTIFFRef, ImageRef
+from llm_agent.tools.data_analysis_tool.utils import algorithm_to_pseudocode, normalized_data_array
+from llm_agent.utils.dask import DaskComputeError, DataSizeTooLargeError
+
+if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry
 
 log = logging.getLogger(__name__)
 
@@ -54,9 +59,8 @@ log = logging.getLogger(__name__)
 TOOL_DESCRIPTION = """\
 A tool that can perform some basic data analysis to compute results from data. \
 It works by constructing an algorithm (via an LLM) by composing various pre-defined functions and \
-then executing it. These functions are currently limited to operations such as \
-geocoding, data filtering, aggregation, computing basic statistics, and visualization. If it is \
-unable to solve a problem using these functions, it returns an error message stating so.
+then executing it. If it is unable to solve a problem using these functions, it returns an error \
+message stating so.
 
 This tool simply constructs a solution, executes it, and returns the results. \
 It has no ability to inspect the outputs it produces, nor does it remember context from \
@@ -79,26 +83,20 @@ class InvalidVariableIDError(Exception):
         self.variable_id = variable_id
 
 
-class DataAnalysisToolInput(LLMToolInput):
+class DataAnalysisToolInput(ToolInput):
     """Inputs to the DataAnalysisTool."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     problem_statement: str = Field(
-        description=(
-            "A clear and unambiguous statement of the problem. This can include place names, "
-            "which will be geocoded into precise polygons for the analysis."
-        ),
+        description=("A clear and unambiguous statement of the problem."),
     )
-    user_provided_geometry: Geometry | None = Field(
-        description=(
-            "A geometry provided by the user that indicates the area to which the analysis should "
-            "be limited."
-        ),
-        default=None,
-    )
-    variable_ids: list[str] = Field(
-        description="Variable IDs that should be used in the data analysis.",
+    input_data: list[str | GeometryRef] = Field(
+        description="List of input data items, which can be either (1) variable IDs (strings) from "
+        "the results of the data search tool or (2) geometry references returned by the geocoding "
+        "tool or provided by the user. References passed here should have their original keys but "
+        "the name and description fields can be rewritten for clarity; the names should be brief "
+        "and in snake-case.",
         min_length=1,
     )
     outputs_requested: list[OutputVariable] = Field(
@@ -112,55 +110,12 @@ class DataAnalysisToolOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    data_outputs: dict[str, str | int | float | GeoTIFFRef] | None = Field(
-        description="Mapping of variable names to their computed values. Any GeoTIFFRefs "
-        "will be rendered as raster layers on a map in the UI."
-    )
-    image_outputs: list[str] | None = Field(
-        description="Variable names for which images are attached in this "
-        "response, in the same order as the names here."
+    outputs: Mapping[str, str | int | float | ImageRef | GeoTIFFRef | AnimationRef] | None = Field(
+        description="Computed values of the requested outputs."
     )
     solution_pseudocode: str | None = Field(
         description="Pseudocode for the solution in Python-like syntax."
     )
-    _image_data: list[Base64ImageContent] = PrivateAttr(default_factory=list[Base64ImageContent])
-
-    def __init__(
-        self,
-        *,
-        data_outputs: dict[str, str | int | float | GeoTIFFRef] | None,
-        image_outputs: list[str] | None = None,
-        solution_pseudocode: str | None = None,
-        image_data: list[Base64ImageContent] | None = None,
-    ) -> None:
-        """Constructor."""
-        super().__init__(
-            data_outputs=data_outputs,
-            image_outputs=image_outputs,
-            solution_pseudocode=solution_pseudocode,
-        )
-        self._image_data = image_data or []
-        self._validate_image_info_consistent_with_data()
-
-    @property
-    def image_data(self) -> list[Base64ImageContent]:
-        """Access image data."""
-        return self._image_data
-
-    @model_validator(mode="after")
-    def _validate_nonempty(self) -> Self:
-        if not (self.data_outputs or self.image_outputs):
-            msg = "Must provide at least one of data_outputs and image_outputs."
-            raise ValueError(msg)
-        return self
-
-    def _validate_image_info_consistent_with_data(self) -> Self:
-        num_image_outputs = len(self.image_outputs) if self.image_outputs else 0
-        num_images = len(self._image_data) if self._image_data else 0
-        if num_image_outputs != num_images:
-            msg = f"len(image_outputs) != len(images): {num_image_outputs} != {num_images}"
-            raise ValueError(msg)
-        return self
 
 
 class DataAnalysisToolProblemFormulatedUpdate(BaseModel):
@@ -181,11 +136,16 @@ class DataAnalysisToolSolutionGeneratedUpdate[S: AlgorithmSolutionSpec[BaseFunct
     """Intermediate result indicating a solution has been generated."""
 
     solution: S
+    pseudocode: str = Field(
+        description="Pseudocode generated deterministically from the algorithm as opposed to "
+        "the pseudocode field inside the solution which is written by the LLM."
+    )
 
 
+@observe(as_type="chain")
 def _variable_id_to_algo_input_variable(
     knowledge_graph_dao: KnowledgeGraphDAO, var_id: str
-) -> InputVariable:
+) -> DataArrayVariable:
     """Make a variable compatible with AlgorithmAgent's interface.
 
     Args:
@@ -193,8 +153,7 @@ def _variable_id_to_algo_input_variable(
         var_id (str): The ID in the knowledge graph of the variable to look up
 
     Returns:
-        InputVariable: The full `InputVariable` that can be used during
-            execution
+        DataArrayVariable: The full `DataArrayVariable` that can be used during execution.
 
     Raises:
         InvalidVariableIDError: Raised if the knowledge graph does not have the
@@ -209,6 +168,64 @@ def _variable_id_to_algo_input_variable(
 
     out = input_variable_from_model(looked_up_var, dataset)
     return out
+
+
+def open_dataset_from_source(source: DatasetSource) -> xr.Dataset:
+    """Open an xarray Dataset from a DatasetSource.
+
+    Args:
+        source: The dataset source containing format and URI information
+
+    Returns:
+        xr.Dataset: The opened dataset
+
+    Raises:
+        ValueError: If the S3 URI format is invalid for icechunk datasets
+    """
+    match source.format:
+        case "zarr":
+            return xr.open_zarr(source.uri, chunks="auto")  # pyright: ignore[reportUnknownMemberType]
+        case "icechunk-zarr":
+            # Parse S3 URI: s3://bucket/prefix
+            s3_uri = source.uri
+            if not s3_uri.startswith("s3://"):
+                raise ValueError(f"Invalid S3 URI for icechunk: {s3_uri}")
+            s3_path = s3_uri[5:]  # Remove "s3://"
+            bucket, _, prefix = s3_path.partition("/")
+
+            # Create storage, open repository, and get readonly session
+            storage = s3_storage(bucket=bucket, prefix=prefix)
+            config = Repository.fetch_config(storage)
+            if config is None:
+                raise ValueError("Cannot fetch Icechunk repo.")
+            vccs = config.virtual_chunk_containers
+
+            repo = Repository.open(
+                storage=storage,
+                authorize_virtual_chunk_access={
+                    vcc.url_prefix: Credentials.S3(S3Credentials.Anonymous())
+                    for vcc in vccs.values()
+                }
+                if vccs
+                else None,
+            )
+            session = repo.readonly_session(branch="main")
+
+            return xr.open_dataset(  # pyright: ignore[reportUnknownMemberType]
+                session.store,  # pyright: ignore[reportArgumentType]
+                engine="zarr",
+                chunks="auto",
+            )
+        case "kerchunk-parquet":
+            return xr.open_dataset(  # pyright: ignore[reportUnknownMemberType]
+                source.uri,
+                engine="kerchunk",
+                storage_options={
+                    "remote_protocol": "s3",
+                    "target_protocol": "s3",
+                },
+                chunks="auto",
+            )
 
 
 @observe(as_type="chain")
@@ -229,148 +246,162 @@ async def _get_variable_data(knowledge_graph_dao: KnowledgeGraphDAO, var_id: str
             item with that ID.
 
     """
-
-    def _open_dataset_shim(source: DatasetSource) -> xr.Dataset:
-        match source.format:
-            case "zarr":
-                return xr.open_zarr(source.uri, chunks="auto")  # pyright: ignore[reportUnknownMemberType]
-            case "kerchunk-parquet":
-                return xr.open_dataset(  # pyright: ignore[reportUnknownMemberType]
-                    source.uri,
-                    engine="kerchunk",
-                    storage_options={
-                        "remote_protocol": "s3",
-                        "target_protocol": "s3",
-                    },
-                    chunks="auto",
-                )
-
     input_variable = _variable_id_to_algo_input_variable(knowledge_graph_dao, var_id)
     dataset = knowledge_graph_dao.get_dataset_by_variable_id(var_id)
 
     if dataset is None:
         raise InvalidVariableIDError(variable_id=var_id)
 
-    uri = dataset.source
-    log.info("Opening Zarr with reference file: %s", uri)
+    source = dataset.source
+    log.info("Opening dataset from source: %s (format: %s)", source.uri, source.format)
 
-    ds = await to_thread.run_sync(_open_dataset_shim, uri)
+    ds = await to_thread.run_sync(open_dataset_from_source, source)
     da = ds[input_variable.name]
     da = normalized_data_array(da)
 
     return da
 
 
-def _fig_to_image_content(fig: Figure) -> Base64ImageContent:
-    """Convert matplotlib figure to base 64 encoded string."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.2)  # type: ignore[reportUnknownMemberType]
-    plt.close(fig)
-    image_bytes = buf.getvalue()
-    image_content = Base64ImageContent(
-        media_type="image/png",
-        data=base64.b64encode(image_bytes).decode("utf-8"),
-    )
-    return image_content
-
-
-def _ensure_valid_output_type(val: Any) -> str | int | float | GeoTIFFRef:  # noqa: ANN401
+@observe(as_type="chain")
+async def _ensure_valid_output_type(
+    val: Any,  # noqa: ANN401
+) -> str | int | float | ImageRef | GeoTIFFRef | AnimationRef:
     """Ensure output value is a scalar."""
-    if isinstance(val, str | int | float | GeoTIFFRef):
-        return val
-    if isinstance(val, xr.DataArray):
-        return compute(val).item()
-    raise TypeError
+    if not isinstance(val, str | int | float | ImageRef | GeoTIFFRef | AnimationRef):
+        raise TypeError
+    return val
 
 
-def _algo_outputs_to_tool_output(
+@observe(as_type="chain")
+async def _algo_outputs_to_tool_output(
     *, algo_outputs: dict[str, Any] | None = None, pseudocode: str | None = None
 ) -> DataAnalysisToolOutput:
     """Prepare algorithm execution outputs to be fed back to the LLM."""
     algo_outputs = algo_outputs or {}
-    data_outputs = {
-        k: _ensure_valid_output_type(v)
-        for k, v in algo_outputs.items()
-        if not isinstance(v, Figure)
-    }
-    plot_outputs = {k: v for k, v in algo_outputs.items() if isinstance(v, Figure)}
-    image_contents = [_fig_to_image_content(fig) for fig in plot_outputs.values()]
-
-    return DataAnalysisToolOutput(
-        data_outputs=data_outputs,
-        image_outputs=(list(plot_outputs.keys()) if plot_outputs else None),
-        solution_pseudocode=pseudocode,
-        image_data=image_contents,
-    )
+    outputs = {k: await _ensure_valid_output_type(v) for k, v in algo_outputs.items()}
+    return DataAnalysisToolOutput(outputs=outputs, solution_pseudocode=pseudocode)
 
 
+@observe(as_type="chain")
 def _prepare_problem[P: AlgorithmProblemSpec](
     knowledge_graph_dao: KnowledgeGraphDAO, problem_spec: type[P], tool_input: DataAnalysisToolInput
-) -> P | ErrorResponse:
-    # prepare inputs to the AlgorithmAgent
+) -> tuple[P, dict[str, InputVariable]] | ErrorResponse:
+    """Prepare inputs to the AlgorithmAgent."""
+    algo_input_vars: dict[str, InputVariable] = {}
     try:
-        algo_input_vars = [
-            _variable_id_to_algo_input_variable(knowledge_graph_dao, v_id)
-            for v_id in tool_input.variable_ids
-        ]
+        for inp in tool_input.input_data:
+            match inp:
+                case str():
+                    algo_input_vars[inp] = _variable_id_to_algo_input_variable(
+                        knowledge_graph_dao, inp
+                    )
+                case GeometryRef():
+                    algo_input_vars[inp.name] = GeometryVariable(
+                        name=inp.name,
+                        variable_type="geometry",
+                        geometry_type="polygon",
+                        description=inp.description,
+                    )
     except InvalidVariableIDError as e:
         log.exception("Invalid variable ID: %s", e.variable_id)
         return ErrorResponse(
             message=f"Could not find data for variable: {e.variable_id}",
         )
-
-    if any("list" in o.variable_type for o in tool_input.outputs_requested):
-        return ErrorResponse(
-            message="list[] types are not yet supported for output "
-            "variables. Request each item individually.",
-        )
-    return problem_spec(
+    problem_spec_instance = problem_spec(
         statement=tool_input.problem_statement,
         outputs_requested=tool_input.outputs_requested,
-        inputs_provided=algo_input_vars,
-        user_provided_geometry=tool_input.user_provided_geometry,
+        inputs_provided=list(algo_input_vars.values()),
     )
+    return problem_spec_instance, algo_input_vars
 
 
+@observe(as_type="chain")
 async def _construct_solution[F: BaseFunctionCall](
-    context: ToolCallContext, agent: AlgorithmAgent[F], problem: AlgorithmProblemSpec
+    ctx: RunContext[AgentDeps], agent: AlgorithmAgent[F]
 ) -> AlgorithmSolutionSpec[F] | ErrorResponse:
+    ctx.deps.update_progress(ctx, DataAnalysisToolSolutionAttemptUpdate(attempt_num=1))
     try:
-        attempts = 0
-        context.update_progress(DataAnalysisToolSolutionAttemptUpdate(attempt_num=attempts + 1))
-        async for output in agent.run_typed(context.global_context, inp=problem):
-            if isinstance(output, ErrorResponse):
-                attempts += 1
-                context.update_progress(
-                    DataAnalysisToolSolutionAttemptUpdate(attempt_num=attempts + 1)
-                )
-            else:
-                solution = output
-                break
-        else:
-            return ErrorResponse(
-                message="Failed to generate a valid solution. "
-                "Consider asking for fewer or simpler outputs.",
-            )
-    except MaxAllowedToolCallsExceededError:
+        solution = await _run_algorithm_agent(agent, ctx)
+    except (UnexpectedModelBehavior, UsageLimitExceeded):
+        log.exception("AlgorithmAgent failed to produce a valid solution.")
         return ErrorResponse(
             message="Failed to generate a valid solution. "
             "Consider asking for fewer or simpler outputs.",
         )
 
-    if solution.error_message is not None:
+    if solution.error_message:
         return ErrorResponse(message=solution.error_message)
 
     return solution
 
 
+class AlgorithmAgentThinkingDeltaUpdate(BaseModel):
+    """Content delta for the Algorithm agent's thinking."""
+
+    content_delta: str
+
+
+class AlgorithmAgentThinkingCompleteUpdate(BaseModel):
+    """Algorithm agent's full thinking content."""
+
+    content: str
+
+
+@observe(as_type="chain")
+async def _run_algorithm_agent[F: BaseFunctionCall](
+    agent: AlgorithmAgent[F], ctx: RunContext[AgentDeps]
+) -> AlgorithmSolutionSpec[F]:
+    agent_stream = agent.run_stream(
+        ctx.deps.chat_context,
+        progress_callback=ctx.deps.make_progress_callback_for_nested_tool(ctx),
+    )
+    solution: AlgorithmSolutionSpec[F] | None = None
+    # Iterate to exhaustion rather than returning early: Langfuse's `@observe` on an async
+    # generator only ends (and therefore exports) its span when the generator is exhausted.
+    async for event in agent_stream:
+        solution = _handle_algorithm_agent_event(ctx, event) or solution
+
+    if solution is None:
+        raise UnexpectedModelBehavior("Algorithm agent run terminated without producing solution.")
+
+    return solution
+
+
+def _handle_algorithm_agent_event[F: BaseFunctionCall](
+    ctx: RunContext[AgentDeps], event: AlgorithmAgentStreamEvent[F]
+) -> AlgorithmSolutionSpec[F] | None:
+    """Report progress for a stream event, returning the solution if the run finished."""
+    match event:
+        case PartDeltaEvent(delta=ThinkingPartDelta(content_delta=str(content_delta))):
+            log.debug("\n[Thinking Part Delta] %s", content_delta)
+            ctx.deps.update_progress(
+                ctx, AlgorithmAgentThinkingDeltaUpdate(content_delta=content_delta)
+            )
+        case PartStartEvent(part=ThinkingPart(content=content)):
+            log.debug("\n[Thinking Part Delta] %s", content)
+            ctx.deps.update_progress(ctx, AlgorithmAgentThinkingDeltaUpdate(content_delta=content))
+        case PartEndEvent(part=ThinkingPart(content=content)):
+            log.info("\n[Thinking] %s", content)
+            ctx.deps.update_progress(ctx, AlgorithmAgentThinkingCompleteUpdate(content=content))
+        case AgentRunResultEvent(result=final_result):
+            log.info("\n[Run Finished] The agent run has completely finished.")
+            return final_result.output
+        case _:
+            pass
+    return None
+
+
+@observe(as_type="chain")
 async def _execute_algorithm(
-    context: ToolCallContext,
-    input_vars: dict[str, xr.DataArray],
+    tool_call_context: ToolCallContext,
+    input_vars: "dict[str, xr.DataArray | BaseGeometry]",
     solution: AlgorithmSolutionSpec[BaseFunctionCall],
+    exec_config: ExecutionConfig,
 ) -> dict[str, Any] | ErrorResponse:
     try:
-        algo_outputs = await execute_algorithm(context, solution.algorithm, input_vars=input_vars)
+        algo_outputs = await execute_algorithm(
+            tool_call_context, solution.algorithm, input_vars=input_vars, exec_config=exec_config
+        )
     except (DataSizeTooLargeError, DaskComputeError) as e:
         log.exception("Error executing algorithm.")
         return ErrorResponse(message=f"Error encountered while executing solution: {e!r}")
@@ -386,14 +417,29 @@ async def _execute_algorithm(
     return algo_outputs
 
 
-async def _extract_arguments_from_input(
-    context: ToolCallContext, problem: AlgorithmProblemSpec, variable_ids: list[str]
-) -> dict[str, xr.DataArray] | ErrorResponse:
+@observe(as_type="chain")
+async def _algo_input_vars_to_exec_input_vars(
+    ctx: RunContext[AgentDeps],
+    algo_input_vars: dict[str, InputVariable],
+    tool_input: DataAnalysisToolInput,
+) -> "dict[str, xr.DataArray | BaseGeometry] | ErrorResponse":
     try:
-        input_vars = {
-            v.name: await _get_variable_data(context.global_context.knowledge_graph_dao, v_id)
-            for v_id, v in zip(variable_ids, problem.inputs_provided, strict=True)
+        input_vars: dict[str, xr.DataArray | BaseGeometry] = {}
+        geom_refs = {
+            d.name.lower().replace(" ", "_").replace("-", "_"): d
+            for d in tool_input.input_data
+            if isinstance(d, GeometryRef)
         }
+        for k, v in algo_input_vars.items():
+            match v:
+                case GeometryVariable():
+                    geom_ref = geom_refs[v.name]
+                    input_vars[v.name] = ctx.deps.chat_context.retrieve_data(geom_ref)
+                case _:
+                    input_vars[v.name] = await _get_variable_data(
+                        ctx.deps.chat_context.global_context.knowledge_graph_dao, var_id=k
+                    )
+
     except InvalidVariableIDError as e:
         log.exception("Invalid variable ID.")
         return ErrorResponse(message=f"Could not find data for variable: {e.variable_id}")
@@ -401,103 +447,97 @@ async def _extract_arguments_from_input(
     return input_vars
 
 
+@observe(as_type="chain")
 async def _a_execute_data_analysis_tool(
-    context: ToolCallContext, inp: DataAnalysisToolInput
+    ctx: RunContext[AgentDeps],
+    inp: DataAnalysisToolInput,
+    model: Model,
+    exec_config: ExecutionConfig,
 ) -> DataAnalysisToolOutput | ErrorResponse:
     """Execute DataAnalysisTool tool."""
+    knowledge_graph_dao = ctx.deps.chat_context.global_context.knowledge_graph_dao
+
     # prepare AlgorithmAgent inputs
     problem_spec_or_error = _prepare_problem(
-        context.global_context.knowledge_graph_dao,
+        knowledge_graph_dao,
         problem_spec=AlgorithmProblemSpec,
         tool_input=inp,
     )
     if isinstance(problem_spec_or_error, ErrorResponse):
         return problem_spec_or_error
-    problem = problem_spec_or_error
+    problem, algo_input_vars = problem_spec_or_error
     log.info("Problem:\n%s", pretty_repr(problem))
 
-    context.update_progress(DataAnalysisToolProblemFormulatedUpdate(problem=problem))
+    ctx.deps.update_progress(ctx, DataAnalysisToolProblemFormulatedUpdate(problem=problem))
 
     # configure agent
     function_set = input_vars_to_function_set(problem.inputs_provided)
     function_call_model = make_function_call_model(function_set.functions)
 
     agent = AlgorithmAgent(
-        llm=BedrockClaudeLLM(model_id=ALGORITHM_AGENT_DEFAULT_LLM_MODEL_ID),
+        model,
         problem=problem,
         function_call_type=function_call_model,
     )
 
     # run AlgorithmAgent
-    solution_or_error = await _construct_solution(context, agent, problem)
+    solution_or_error = await _construct_solution(ctx, agent)
     if isinstance(solution_or_error, ErrorResponse):
         return solution_or_error
     solution = solution_or_error
     log.info("Solution:\n%s", pretty_repr(solution))
 
-    context.update_progress(DataAnalysisToolSolutionGeneratedUpdate(solution=solution))
+    ctx.deps.update_progress(
+        ctx,
+        DataAnalysisToolSolutionGeneratedUpdate(
+            solution=solution, pseudocode=algorithm_to_pseudocode(solution.algorithm)
+        ),
+    )
 
     # extract arguments
-    input_vars = await _extract_arguments_from_input(context, problem, inp.variable_ids)
-    if isinstance(input_vars, ErrorResponse):
-        return input_vars
+    exec_input_vars = await _algo_input_vars_to_exec_input_vars(ctx, algo_input_vars, inp)
+    if isinstance(exec_input_vars, ErrorResponse):
+        return exec_input_vars
 
     # execute algorithm
-    algo_outputs_or_error = await _execute_algorithm(context, input_vars, solution)
+    tool_call_context = ToolCallContext(
+        tool_call_id=ctx.tool_call_id or "",
+        chat_context=ctx.deps.chat_context,
+        progress_callback=ctx.deps.progress_callback,
+    )
+    algo_outputs_or_error = await _execute_algorithm(
+        tool_call_context, exec_input_vars, solution, exec_config=exec_config
+    )
     if isinstance(algo_outputs_or_error, ErrorResponse):
         return algo_outputs_or_error
     algo_outputs = algo_outputs_or_error
     log.info("Algorithm execution outputs:\n%s", pretty_repr(algo_outputs))
 
-    return _algo_outputs_to_tool_output(algo_outputs=algo_outputs, pseudocode=solution.pseudocode)
+    return await _algo_outputs_to_tool_output(
+        algo_outputs=algo_outputs, pseudocode=algorithm_to_pseudocode(solution.algorithm)
+    )
 
 
-class DataAnalysisTool(
-    LLMToolTyped[DataAnalysisToolInput, DataAnalysisToolOutput, DataAnalysisToolOutput]
-):
-    """Tool to generate algorithm solution and run it."""
+class DataAnalysisTool(AgentTool[DataAnalysisToolInput, DataAnalysisToolOutput | ErrorResponse]):
+    """Tool to generate an algorithm solution and run it."""
 
-    def __init__(self) -> None:
-        """Initializer."""
-        super().__init__(
-            name="DataAnalysisTool",
-            description=TOOL_DESCRIPTION,
-            input_model=DataAnalysisToolInput,
-            user_output_model=DataAnalysisToolOutput,
-            llm_output_model=DataAnalysisToolOutput,
-        )
+    name = "DataAnalysisTool"
+    description = TOOL_DESCRIPTION
+    input_model = DataAnalysisToolInput
+    output_type = DataAnalysisToolOutput | ErrorResponse
 
-    @observe(as_type="tool", name=__name__)
-    @timed_function()
-    def _execute_typed(
-        self, context: ToolCallContext, tool_input: DataAnalysisToolInput
-    ) -> ToolOutput[DataAnalysisToolOutput, DataAnalysisToolOutput] | ErrorResponse:
-        """Execute DataAnalysisTool tool."""
-        out = from_thread.run(_a_execute_data_analysis_tool, context, tool_input)
-        if isinstance(out, ErrorResponse):
-            return out
-        return ToolOutput(user=out, llm=out)
+    def __init__(self, model: Model, exec_config: ExecutionConfig | None = None) -> None:
+        """Initializer.
 
-    def _wrap_output(
-        self,
-        tool_use_request: LLMToolUseContent,
-        output: ToolOutput[DataAnalysisToolOutput, DataAnalysisToolOutput] | ErrorResponse,
-    ) -> (
-        EnrichedLLMToolResultContent[DataAnalysisToolOutput]
-        | EnrichedLLMToolResultContent[ErrorResponse]
-    ):
-        if isinstance(output, ErrorResponse):
-            error = output
-            return EnrichedLLMToolResultContent[ErrorResponse](
-                id=tool_use_request.id,
-                status="error",
-                content=[JSONContent(data=error.model_dump(mode="json"))],
-                data=error,
-            )
-        out = output["user"]
-        return EnrichedLLMToolResultContent[DataAnalysisToolOutput](
-            id=tool_use_request.id,
-            status="success",
-            content=[JSONContent(data=out.model_dump(mode="json")), *out.image_data],
-            data=out,
-        )
+        Args:
+            model: The Pydantic AI model used to drive the nested ``AlgorithmAgent``.
+            exec_config: Optional execution configuration for running the generated algorithm.
+        """
+        self._model = model
+        self._exec_config = exec_config or ExecutionConfig()
+
+    async def __call__(
+        self, ctx: RunContext[AgentDeps], tool_input: DataAnalysisToolInput, /
+    ) -> DataAnalysisToolOutput | ErrorResponse:
+        """Generate an algorithm solution for the problem, execute it, and return the results."""
+        return await _a_execute_data_analysis_tool(ctx, tool_input, self._model, self._exec_config)

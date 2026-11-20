@@ -106,7 +106,7 @@ class TestBinaryOperations:
         assert isinstance(result, InferredDataArrayVariable)
         assert result.dims == frozenset({"time", "lat", "lon"})
 
-    def test_dataarray_dataarray_incompatible_dims(self):
+    def test_dataarray_dataarray_broadcasts_subset_dims(self):
         context = ExecutionContext({}, valid_time_dims={"time"})
         da1 = InferredDataArrayVariable(
             type="DataArray",
@@ -127,8 +127,38 @@ class TestBinaryOperations:
             op="add",
         )
 
-        with pytest.raises(BinaryOpDataArrayMisMatchError):
-            type_check_expression(expr, context)
+        result = type_check_expression(expr, context)
+
+        assert isinstance(result, InferredDataArrayVariable)
+        assert result.dims == frozenset({"time", "lat", "lon"})
+        assert result.shape == {"time": 10, "lat": 20, "lon": 30}
+
+    def test_dataarray_dataarray_broadcasts_size_one_dim(self):
+        context = ExecutionContext({}, valid_time_dims={"time"})
+        da1 = InferredDataArrayVariable(
+            type="DataArray",
+            dims=frozenset({"lat", "lon"}),
+            shape={"lat": 1, "lon": 30},
+        )
+        da2 = InferredDataArrayVariable(
+            type="DataArray",
+            dims=frozenset({"lat", "lon"}),
+            shape={"lat": 20, "lon": 30},
+        )
+        context.variables.update({"da1": da1, "da2": da2})
+
+        expr = BinaryOperation(
+            func_name="BinaryOperation",
+            left=VariableReference(name="da1"),
+            right=VariableReference(name="da2"),
+            op="add",
+        )
+
+        result = type_check_expression(expr, context)
+
+        assert isinstance(result, InferredDataArrayVariable)
+        assert result.dims == frozenset({"lat", "lon"})
+        assert result.shape == {"lat": 20, "lon": 30}
 
     def test_dataarray_dataarray_incompatible_shapes(self):
         context = ExecutionContext({}, valid_time_dims={"time"})

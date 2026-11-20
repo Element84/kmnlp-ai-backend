@@ -12,6 +12,7 @@ This is a **geospatial data analysis** system using specialized LLM agents for s
 ## Key Components & Data Flow
 
 ### Agent Orchestration Pattern
+
 ```
 User Query → OrchestrationAgent → [DataSearchTool, DataAnalysisTool, TextResponseTool] → Response
                 ↓
@@ -21,12 +22,14 @@ User Query → OrchestrationAgent → [DataSearchTool, DataAnalysisTool, TextRes
 ```
 
 ### Tool Integration
+
 - **Agents extend `Agent[LLMAgentContext]`** for domain-specific tasks
 - **Tools extend `LLMToolTyped`** for orchestration capabilities
 - **Context flows through `LLMAgentContext`** containing place lookup and other shared state
 - **Tools use `from_thread.run()` to call async agent methods from sync tool contexts**
 
 ### Critical Integration Points
+
 - **`src/llm_agent/tools/data_analysis_tool.py`**: Bridges orchestration to algorithm generation via AlgorithmAgent
 - **`src/llm_agent/agents/algorithm_agent/algorithm/exec.py`**: Executes generated algorithms using xarray/matplotlib
 - **`src/llm_agent/dao/knowledge_graph_dao.py`**: SPARQL interface to RDF dataset knowledge graph
@@ -35,6 +38,7 @@ User Query → OrchestrationAgent → [DataSearchTool, DataAnalysisTool, TextRes
 ## Development Workflow
 
 ### Environment Setup
+
 ```bash
 uv pip install -r pyproject.toml          # Install dependencies
 uv pip install -r pyproject.toml --extra dev  # Install dev dependencies
@@ -42,11 +46,13 @@ pre-commit install                         # Install pre-commit hooks
 ```
 
 ### Code Quality Pipeline
+
 - **Linting**: `scripts/lint.sh` runs Ruff, pyright, and shellcheck
 - **Testing**: `scripts/test.sh` with pytest (unit tests) and integration tests requiring AWS
 - **Evaluation**: `python scripts/run_evals.py` runs comprehensive agent evaluations
 
 ### Docker & CI/CD
+
 - **Multi-stage Dockerfile** using UV for dependency management
 - **GitLab CI** with build → test → integration → evals pipeline
 - **ECR deployment** with role assumption for AWS resources
@@ -54,6 +60,7 @@ pre-commit install                         # Install pre-commit hooks
 ## Project-Specific Patterns
 
 ### Agent Implementation Pattern
+
 ```python
 class MyAgent(Agent[LLMAgentContext]):
     def __init__(self, llm: LLM, inference_cfg: LLMInferenceConfig | None = None):
@@ -65,25 +72,29 @@ class MyAgent(Agent[LLMAgentContext]):
 ```
 
 ### Tool Integration Pattern
+
 ```python
-class MyTool(LLMToolTyped[InputT, UserOutputT, LLMOutputT]):
-    def _execute_tool(self, context: LLMAgentContext, inp: InputT) -> ToolOutput | ErrorResponse:
+class MyTool(LLMToolTyped[InputT, OutputT]):
+    def _execute_tool(self, context: LLMAgentContext, inp: InputT) -> OutputT | ErrorResponse:
         # Use from_thread.run() to call async agent methods
         out = from_thread.run(self._async_method, context, inp)
 ```
 
 ### Algorithm Function Sets
+
 - **Located in `agents/algorithm_agent/algorithm/function_sets/`**
 - **DataArrayFunctionSet**: xarray operations (slicing, filtering, reducing)
 - **GeneralPlottingFunctionSet**: matplotlib visualization functions
 - **Function sets are dynamically selected based on input variable types**
 
 ### Error Handling Convention
+
 - **Return `ErrorResponse` objects rather than raising exceptions** in tool execution
 - **Use `EnrichedValidationError` for Pydantic validation with context**
 - **Tools wrap outputs in `EnrichedLLMToolResultContent` for debugging**
 
 ### Evaluation Framework
+
 - **Located in `src/llm_agent/evaluation/`** with agent-specific evaluators
 - **Uses `BaseEvaluator` pattern with typed metrics and aggregation**
 - **Evaluation datasets in `evals/datasets/` as Python modules**

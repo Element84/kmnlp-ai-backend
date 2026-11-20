@@ -1,192 +1,227 @@
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
-from unittest.mock import Mock
+from collections.abc import AsyncIterator
 
 import pytest
-from e84_geoai_common.llm.core import (
-    JSONContent,
-    LLMToolResultContent,
-    LLMToolUseContent,
-    LLMUserMessage,
+from pydantic import BaseModel
+from pydantic_ai import RunContext
+from pydantic_ai.messages import (
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPart,
+    TextPartDelta,
+    ToolCallPart,
+    ToolReturnPart,
 )
-from e84_geoai_common.llm.models.claude import BedrockClaudeLLM
-from e84_geoai_common.llm.tests.mock_bedrock_runtime import (
-    _MockBedrockRuntimeClient,  # type: ignore[reportPrivateUsage]
-    claude_response_with_content,
-    make_test_bedrock_runtime_client,
-)
-from rich import print as rich_print
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
-from llm_agent import ORCHESTRATION_AGENT_DEFAULT_LLM_MODEL_ID
-from llm_agent.agents.orchestration_agent.orchestration_agent import (
-    OrchestrationAgent,
-)
-from llm_agent.agents.tools_config import ToolsConfig
-from llm_agent.context import LLMAgentContext, ToolCallContext
-from llm_agent.model.dataset import Dataset, DatasetSource
-from llm_agent.tools.data_analysis_tool.data_analysis_tool import (
-    DataAnalysisTool,
-    DataAnalysisToolOutput,
-    _algo_outputs_to_tool_output,  # pyright: ignore[reportPrivateUsage]
-)
-from llm_agent.tools.data_search_tool import DataSearchTool, DataSearchToolResult
-from llm_agent.tools.response_shaping_tools import end_turn_tool
-from llm_agent.tools.response_shaping_tools.text_response_tool import (
-    TextResponse,
-    text_response_tool,
-)
-from llm_agent.utils.prompt_as_service import PromptServiceAdapter
-from llm_agent.utils.utils import EnrichedLLMToolResultContent
-
-stub_responses = [
-    # response to initial question
-    claude_response_with_content(
-        [
-            {
-                "id": "tool_use_01",
-                "name": "DataSearchTool",
-                "input": {
-                    "variable_description": "Sea surface temperature",
-                    "time_range": {
-                        "time_min": "2024-06-01",
-                        "time_max": "2024-06-01",
-                    },
-                },
-            },
-        ],
-        overrides={"stop_reason": "tool_use"},
-    ),
-    # response to tool data search result
-    claude_response_with_content(
-        [
-            {
-                "id": "tool_use_02",
-                "name": "DataAnalysisTool",
-                "input": {
-                    "problem_statement": "Compute the mean sea surface temperature in the Black Sea on June 01, 2024.",  # noqa: E501
-                    "variable_ids": ["coraltemp-v3.1-sst"],
-                    "outputs_requested": [
-                        {
-                            "name": "sst_mean",
-                            "variable_type": "scalar_float",
-                            "description": "Mean SST in the Black Sea on June 01, 2024.",
-                        },
-                    ],
-                },
-            },
-        ],
-        overrides={"stop_reason": "tool_use"},
-    ),
-    # response to tool data analysis result
-    claude_response_with_content(
-        [
-            {
-                "id": "tool_use_03",
-                "name": "TextResponseTool",
-                "input": {"text": "The mean SST was 20.03 deg C."},
-            },
-        ],
-        overrides={"stop_reason": "tool_use"},
-    ),
-    # end turn
-    claude_response_with_content(
-        [
-            {
-                "id": "tool_use_04",
-                "name": "EndTurnTool",
-                "input": {},
-            },
-        ],
-        overrides={"stop_reason": "tool_use"},
-    ),
-]
-
-client = make_test_bedrock_runtime_client(stub_responses)
-llm = BedrockClaudeLLM(model_id=ORCHESTRATION_AGENT_DEFAULT_LLM_MODEL_ID, client=client)
+from llm_agent.agents.orchestration_agent.interface import UserMessage
+from llm_agent.agents.orchestration_agent.orchestration_agent import OrchestrationAgent
+from llm_agent.context import AgentDeps
+from llm_agent.tools.agent_tool import AgentTool
+from llm_agent.tools.data_analysis_tool.data_analysis_tool import DataAnalysisToolOutput
+from llm_agent.tools.data_search_tool import DataSearchToolResult
+from tests.utils.mocks.context import MockChatContext
 
 
-class StubDataSearchTool(DataSearchTool):
-    def execute(
+class _DataSearchInput(BaseModel):
+    natural_language_query: str
+
+
+class _StubDataSearchTool(AgentTool[_DataSearchInput, DataSearchToolResult]):
+    """Stub ``DataSearchTool`` that records calls and returns a canned result."""
+
+    name = "DataSearchTool"
+    description = "Search for relevant datasets."
+    input_model = _DataSearchInput
+    output_type = DataSearchToolResult
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def __call__(
         self,
-        context: ToolCallContext,  # noqa: ARG002
-        tool_use_request: LLMToolUseContent,
-    ) -> LLMToolResultContent:
-        return LLMToolResultContent(
-            id=tool_use_request.id,
-            content=[
-                JSONContent(
-                    data=DataSearchToolResult(
-                        datasets=[
-                            Dataset(
-                                id="http://fake/id",
-                                source=DatasetSource(format="zarr", uri="http://source"),
-                                label="label",
-                                description="description",
-                                landing_page="http://example.com/landing_page",
-                                temporal_coverage=(
-                                    datetime(year=2020, month=1, day=1, tzinfo=UTC),
-                                    datetime(
-                                        year=2024,
-                                        month=11,
-                                        day=30,
-                                        hour=12,
-                                        tzinfo=UTC,
-                                    ),
-                                ),
-                                temporal_resolution=timedelta(days=1),
-                                variables=[],
+        ctx: RunContext[AgentDeps],  # noqa: ARG002
+        tool_input: _DataSearchInput,  # noqa: ARG002
+        /,
+    ) -> DataSearchToolResult:
+        self.call_count += 1
+        return DataSearchToolResult(explanation="Found one dataset.", datasets=[])
+
+
+class _DataAnalysisInput(BaseModel):
+    problem_statement: str
+
+
+class _StubDataAnalysisTool(AgentTool[_DataAnalysisInput, DataAnalysisToolOutput]):
+    """Stub ``DataAnalysisTool`` that records calls and returns a canned result."""
+
+    name = "DataAnalysisTool"
+    description = "Analyze data."
+    input_model = _DataAnalysisInput
+    output_type = DataAnalysisToolOutput
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def __call__(
+        self,
+        ctx: RunContext[AgentDeps],  # noqa: ARG002
+        tool_input: _DataAnalysisInput,  # noqa: ARG002
+        /,
+    ) -> DataAnalysisToolOutput:
+        self.call_count += 1
+        return DataAnalysisToolOutput(
+            outputs={"sst_mean": 20.04}, solution_pseudocode="__pseudocode__"
+        )
+
+
+def _count_tool_returns(messages: list[ModelMessage]) -> int:
+    return sum(
+        isinstance(part, ToolReturnPart)
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+    )
+
+
+def _orchestrate(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # noqa: ARG001
+    """Drive a deterministic search -> analyze -> respond workflow.
+
+    The number of tool results seen so far determines the next step, so the model
+    walks through the tools in order before producing its final text reply.
+    """
+    match _count_tool_returns(messages):
+        case 0:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="DataSearchTool",
+                        args={"natural_language_query": "Sea surface temperature"},
+                    )
+                ]
+            )
+        case 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="DataAnalysisTool",
+                        args={
+                            "problem_statement": (
+                                "Compute the mean SST in the Black Sea on June 01, 2024."
                             )
-                        ]
-                    ).model_dump(mode="json")
+                        },
+                    )
+                ]
+            )
+        case _:
+            return ModelResponse(parts=[TextPart(content="The mean SST was 20.04 deg C.")])
+
+
+async def _orchestrate_stream(
+    messages: list[ModelMessage],
+    info: AgentInfo,  # noqa: ARG001
+) -> AsyncIterator[str | DeltaToolCalls]:
+    """Streaming variant of :func:`_orchestrate`.
+
+    Tool turns yield a single tool-call delta; the final turn streams the text
+    reply across multiple deltas so the test can observe text-delta events.
+    """
+    match _count_tool_returns(messages):
+        case 0:
+            yield {
+                0: DeltaToolCall(
+                    name="DataSearchTool",
+                    json_args='{"natural_language_query": "Sea surface temperature"}',
                 )
-            ],
-            status="success",
-        )
-
-
-class StubDataAnalysisTool(DataAnalysisTool):
-    def execute(
-        self,
-        context: ToolCallContext,  # noqa: ARG002
-        tool_use_request: LLMToolUseContent,
-    ) -> EnrichedLLMToolResultContent[DataAnalysisToolOutput]:
-        out = _algo_outputs_to_tool_output(
-            algo_outputs={"black_sea_mean_scalar": 20.03},
-            pseudocode="__pseudocode__",
-        )
-        return EnrichedLLMToolResultContent(
-            id=tool_use_request.id, content=[JSONContent(data=out.model_dump())], data=out
-        )
-
-
-stub_data_search_tool = StubDataSearchTool(dataset_picking_agent=Mock())
-stub_data_analysis_tool = StubDataAnalysisTool()
+            }
+        case 1:
+            yield {
+                0: DeltaToolCall(
+                    name="DataAnalysisTool",
+                    json_args=(
+                        '{"problem_statement": "Compute the mean SST in the Black Sea '
+                        'on June 01, 2024."}'
+                    ),
+                )
+            }
+        case _:
+            yield "The mean SST "
+            yield "was 20.04 deg C."
 
 
 @pytest.mark.asyncio
-async def test_orchestration_agent(global_context: Callable[..., LLMAgentContext]) -> None:
+async def test_orchestration_agent(chat_context: MockChatContext) -> None:
+    data_search_tool = _StubDataSearchTool()
+    data_analysis_tool = _StubDataAnalysisTool()
     agent = OrchestrationAgent(
-        PromptServiceAdapter(llm.prompt),
-        tools_config=ToolsConfig(
-            tools=[text_response_tool, stub_data_search_tool, stub_data_analysis_tool],
-            end_turn_tool=end_turn_tool,
-            max_allowed_tool_calls_per_turn=16,
+        FunctionModel(_orchestrate), tools=[data_search_tool, data_analysis_tool]
+    )
+
+    response = await agent.run(
+        chat_context,
+        UserMessage(
+            user_message=(
+                "What was the mean sea surface temperature in the Black Sea on June 01, 2024?"
+            )
         ),
     )
-    responses = agent.run(
-        global_context(),
-        conversation=[
-            LLMUserMessage(
-                content="What was the mean sea surface temperature in the Black Sea on June 01, 2024?",  # noqa: E501
-            )
-        ],
+
+    assert "20.04" in response
+    assert data_search_tool.call_count == 1
+    assert data_analysis_tool.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestration_agent_run_stream(chat_context: MockChatContext) -> None:
+    data_search_tool = _StubDataSearchTool()
+    data_analysis_tool = _StubDataAnalysisTool()
+    agent = OrchestrationAgent(
+        FunctionModel(stream_function=_orchestrate_stream),
+        tools=[data_search_tool, data_analysis_tool],
     )
-    responses = [response async for response in responses]
 
-    # print responses if using a real LLM
-    if not isinstance(client, _MockBedrockRuntimeClient):
-        rich_print(responses)
+    events = [
+        event
+        async for event in agent.run_stream(
+            chat_context,
+            UserMessage(
+                user_message=(
+                    "What was the mean sea surface temperature in the Black Sea on June 01, 2024?"
+                )
+            ),
+        )
+    ]
 
-    for r in responses:
-        if isinstance(r, TextResponse):
-            assert "20.03" in r.text
+    tool_calls = [event for event in events if isinstance(event, FunctionToolCallEvent)]
+    tool_results = [event for event in events if isinstance(event, FunctionToolResultEvent)]
+    text_deltas = [
+        event.delta.content_delta
+        for event in events
+        if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta)
+    ]
+    streamed_text = "".join(
+        [
+            *(
+                event.part.content
+                for event in events
+                if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart)
+            ),
+            *text_deltas,
+        ]
+    )
+
+    # Both tools were invoked, in order, and produced results.
+    assert [call.part.tool_name for call in tool_calls] == ["DataSearchTool", "DataAnalysisTool"]
+    assert [result.part.tool_name for result in tool_results] == [
+        "DataSearchTool",
+        "DataAnalysisTool",
+    ]
+    # The final text-only reply streamed incrementally and ended the turn.
+    assert len(text_deltas) >= 1
+    assert streamed_text == "The mean SST was 20.04 deg C."
+    assert data_search_tool.call_count == 1
+    assert data_analysis_tool.call_count == 1

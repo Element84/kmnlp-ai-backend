@@ -14,9 +14,7 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=True,
             tool_call_count=0,
-            explanatory_content_count=1,
             dataset_ids=[],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
     DatasetPickingEvalInput(
@@ -25,9 +23,7 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=True,
             tool_call_count=0,
-            explanatory_content_count=1,
             dataset_ids=[],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
     DatasetPickingEvalInput(
@@ -36,12 +32,10 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=False,
             tool_call_count=1,
-            explanatory_content_count=2,
             dataset_ids=[
-                "crw_daily_5km",
+                "crw_5km_sst_daily",
                 "noaa-cdr-sea-surface-temp-whoi-pds_daily",
             ],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
     DatasetPickingEvalInput(
@@ -50,12 +44,10 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=False,
             tool_call_count=1,
-            explanatory_content_count=2,
             dataset_ids=[
-                "crw_daily_5km",
+                "crw_5km_sst_daily",
                 "noaa-cdr-sea-surface-temp-whoi-pds_daily",
             ],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
     DatasetPickingEvalInput(
@@ -64,9 +56,7 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=False,
             tool_call_count=1,
-            explanatory_content_count=2,
-            dataset_ids=["crw_daily_5km"],
-            has_datasets_in_multiple_responses=False,
+            dataset_ids=["crw_5km_sst_daily"],
         ),
     ),
     DatasetPickingEvalInput(
@@ -75,9 +65,7 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=False,
             tool_call_count=1,
-            explanatory_content_count=2,
             dataset_ids=["air_temperature_noaa-cdr-ocean-nearsurface-atmos-profiles-pds_daily"],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
     DatasetPickingEvalInput(
@@ -86,9 +74,7 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=False,
             tool_call_count=1,
-            explanatory_content_count=2,
             dataset_ids=["noaa-cdr-ocean-heatflux-pds_daily"],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
     DatasetPickingEvalInput(
@@ -97,20 +83,18 @@ _dataset: list[DatasetPickingEvalInput] = [
         expected_response_attrs=DatasetPickingResponseAttrs(
             is_refusal=False,
             tool_call_count=1,
-            explanatory_content_count=2,
             dataset_ids=[
                 "noaa-cdr-precip-cmorph-pds_daily",
                 "noaa-cdr-precip-gpcp-daily-pds_daily",
                 "noaa-cdr-precip-gpcp-monthly-pds_monthly",
                 "noaa-cdr-precip-persiann-pds_daily",
             ],
-            has_datasets_in_multiple_responses=False,
         ),
     ),
 ]
 
 dataset = EvalDataset(
     id="default",
-    version="1",
+    version="2",
     items=[d.to_eval_input() for d in _dataset],
 )

@@ -1,15 +1,16 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
+from functools import partial
+from time import perf_counter
 from typing import Self
 
-from e84_geoai_common.util import timed_function
-from langfuse import observe  # type: ignore[reportUnknownVariableType]
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from anyio.to_thread import run_sync
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_ai import RunContext
 
-from llm_agent.context import ToolCallContext
+from llm_agent.context import AgentDeps
 from llm_agent.model.dataset import Dataset, DatasetSummaryView
-from llm_agent.tools.llm_tool_input import LLMToolInput
-from llm_agent.tools.llm_tool_typed import LLMToolTyped, ToolOutput
+from llm_agent.tools.agent_tool import AgentTool, ToolInput
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ variable will include one or more dimensions.
 MAX_DATASETS_FOR_DETAILED_VIEW = 10
 
 
-class _TemporalCoverageFilter(LLMToolInput):
+class _TemporalCoverageFilter(BaseModel):
     """Temporal coverage filter for filtering datasets by time range."""
 
     model_config = ConfigDict(
@@ -34,10 +35,12 @@ class _TemporalCoverageFilter(LLMToolInput):
     )
 
     start: datetime | None = Field(
-        description="Start of the time range, inclusive. Can be None to indicate no lower bound."
+        description="Start of the time range, inclusive. Can be None to indicate no lower bound. "
+        "Must be UTC."
     )
     end: datetime | None = Field(
-        description="End of the time range, inclusive. Can be None to indicate no upper bound."
+        description="End of the time range, inclusive. Can be None to indicate no upper bound. "
+        "Must be UTC."
     )
 
     @model_validator(mode="after")
@@ -47,8 +50,15 @@ class _TemporalCoverageFilter(LLMToolInput):
             raise ValueError(msg)
         return self
 
+    @field_validator("start", "end")
+    @classmethod
+    def _ensure_utc(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        return v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC)
 
-class _FetchDatasetsToolQuery(LLMToolInput):
+
+class _FetchDatasetsToolQuery(ToolInput):
     """Query arguments for FetchDatasetsTool.
 
     Filter the returned datasets to those that match the provided filters.
@@ -79,7 +89,9 @@ class _FetchDatasetsToolQuery(LLMToolInput):
     regex_filter: str | None = Field(
         default=None,
         description="Optionally filter datasets to those whose metadata matches this regex."
-        "The regex will always be applied in a case-insensitive manner.",
+        "The regex will always be applied in a case-insensitive manner. Avoid making the regex "
+        "overly restrictive; e.g., by making strong assumptions about the order of words. "
+        "Consider relaxing the regex if you get no results.",
         examples=[r"(?:sea surface temperature)", r"(?:coral reef)|(?:air temperature)"],
     )
 
@@ -107,45 +119,81 @@ class _FetchDatasetsToolResult(BaseModel):
     )
 
 
-class FetchDatasetsTool(
-    LLMToolTyped[_FetchDatasetsToolQuery, _FetchDatasetsToolResult, _FetchDatasetsToolResult]
-):
-    """A tool to fetch datasets from the knowledge graph."""
+class KnowledgeGraphQueryUpdate(BaseModel):
+    """Event indicating a knowledge graph query has been initiated."""
 
-    def __init__(self) -> None:
-        """Initializer."""
-        super().__init__(
-            name="FetchDatasetsTool",
-            description=TOOL_DESCRIPTION,
-            input_model=_FetchDatasetsToolQuery,
-            user_output_model=_FetchDatasetsToolResult,
-            llm_output_model=_FetchDatasetsToolResult,
-        )
+    id_filter: list[str] | None
+    temporal_filter: tuple[str | None, str | None] | None
+    regex_filter: str | None
 
-    @observe(as_type="tool", name=__name__)
-    @timed_function()
-    def _execute_typed(
+
+class QueryResultsUpdate(BaseModel):
+    """Event indicating results have been retrieved for a knowledge graph query."""
+
+    num_datasets: int
+    execution_time_sec: float
+    detailed_view: bool
+
+
+class FetchDatasetsTool(AgentTool[_FetchDatasetsToolQuery, _FetchDatasetsToolResult]):
+    """A Pydantic AI tool to fetch datasets from the knowledge graph."""
+
+    name = "FetchDatasetsTool"
+    description = TOOL_DESCRIPTION
+    input_model = _FetchDatasetsToolQuery
+    output_type = _FetchDatasetsToolResult
+
+    async def __call__(
         self,
-        context: ToolCallContext,
-        tool_input: _FetchDatasetsToolQuery,
-    ) -> ToolOutput[_FetchDatasetsToolResult, _FetchDatasetsToolResult]:
-        if tool_input.temporal_coverage_filter:
-            min_start_time = tool_input.temporal_coverage_filter.start
-            max_end_time = tool_input.temporal_coverage_filter.end
+        ctx: RunContext[AgentDeps],
+        query: _FetchDatasetsToolQuery,
+        /,
+    ) -> _FetchDatasetsToolResult:
+        """Fetch datasets matching the provided filters from the knowledge graph."""
+        if query.temporal_coverage_filter:
+            min_start_time = query.temporal_coverage_filter.start
+            max_end_time = query.temporal_coverage_filter.end
         else:
             min_start_time = None
             max_end_time = None
 
-        result = context.global_context.knowledge_graph_dao.fetch_datasets(
-            ids=tool_input.id_filter,
-            start_time=min_start_time,
-            end_time=max_end_time,
-            regex_pattern=tool_input.regex_filter,
+        update = KnowledgeGraphQueryUpdate(
+            id_filter=query.id_filter,
+            temporal_filter=(
+                (min_start_time.isoformat() if min_start_time else None),
+                (max_end_time.isoformat() if max_end_time else None),
+            )
+            if query.temporal_coverage_filter
+            else None,
+            regex_filter=query.regex_filter,
         )
+        log.info("FetchDatasetsTool: KnowledgeGraphQueryUpdate: %s", update)
+        ctx.deps.update_progress(ctx, update)
 
-        if not tool_input.detailed_view or len(result) > MAX_DATASETS_FOR_DETAILED_VIEW:
+        knowledge_graph_dao = ctx.deps.chat_context.global_context.knowledge_graph_dao
+        tic = perf_counter()
+        # The knowledge graph query is blocking; run it off the event loop.
+        result = await run_sync(
+            partial(
+                knowledge_graph_dao.fetch_datasets,
+                ids=query.id_filter,
+                start_time=min_start_time,
+                end_time=max_end_time,
+                regex_pattern=query.regex_filter,
+            )
+        )
+        toc = perf_counter()
+
+        results_update = QueryResultsUpdate(
+            num_datasets=len(result),
+            execution_time_sec=toc - tic,
+            detailed_view=query.detailed_view,
+        )
+        log.info("FetchDatasetsTool: QueryResultsUpdate: %s", results_update)
+        ctx.deps.update_progress(ctx, results_update)
+
+        if not query.detailed_view or len(result) > MAX_DATASETS_FOR_DETAILED_VIEW:
             # convert to summary view to save tokens
-            result = [ds.summary_view() for ds in result]
+            return _FetchDatasetsToolResult(datasets=[ds.summary_view() for ds in result])
 
-        out = _FetchDatasetsToolResult(datasets=result)
-        return ToolOutput(user=out, llm=out)
+        return _FetchDatasetsToolResult(datasets=result)

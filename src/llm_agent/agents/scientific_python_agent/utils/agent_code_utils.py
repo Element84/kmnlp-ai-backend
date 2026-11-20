@@ -1,21 +1,16 @@
 """Utils for use by the agent in its code."""
 
-import asyncio
 import logging
 import os
 
-import humanize.filesize
 import numpy as np
 import numpy.typing as npt
 import xarray as xr
-from dask.distributed import (
-    Future,
-    get_client,  # type: ignore[reportUnknownVariableType]
-)
-from e84_geoai_common.geometry import geometry_to_polygon
+from anyio import to_thread
 from e84_geoai_common.llm.models import BedrockClaudeLLM
 from langfuse import observe  # type: ignore[reportUnknownVariableType]
 from lat_lon_parser import parse  # type: ignore[reportUnknownVariableType]
+from mypy_boto3_bedrock_runtime import BedrockRuntimeClient
 from natural_language_geocoding import extract_geometry_from_text
 from natural_language_geocoding.place_lookup import PlaceLookup
 from rasterio.features import (  # type: ignore[reportMissingTypeStubs]
@@ -26,7 +21,8 @@ from rasterio.transform import (  # type: ignore[reportMissingTypeStubs]
 )
 from rastervision.core.data import RasterioCRSTransformer
 from requests.exceptions import Timeout
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry.base import BaseGeometry
 from tenacity import (
     retry,
     retry_if_exception,
@@ -34,110 +30,26 @@ from tenacity import (
     wait_exponential,
 )
 
+from llm_agent.utils.dask import (
+    SPATIAL_VALID_FRACTION_ATTR,
+    MaterializedDataArray,
+    SpatiallyMaskedDataArray,
+    compute_dask_array,
+)
+
 log = logging.getLogger(__name__)
-
-MAX_ALLOWED_COMPUTE_SIZE = 5 * 10**9  # 5 GB
-
-
-class DaskComputeError(Exception):
-    """Failure to compute values from a dask DataArray."""
-
-
-class DataSizeTooLargeError(Exception):
-    """DataArray size exceeds allowed limit."""
-
-    def __init__(self, nbytes: int) -> None:  # noqa: D107
-        size_str = humanize.filesize.naturalsize(nbytes)
-        size_limit_str = humanize.filesize.naturalsize(MAX_ALLOWED_COMPUTE_SIZE)
-        super().__init__(
-            f"Query requires processing {size_str} of data, "
-            f"which exceeds the allowed limit of {size_limit_str}."
-        )
-
-
-def validate_data_array_size_within_limit(data_array: xr.DataArray) -> None:
-    """Check if DataArray size is within allowed limit."""
-    size_str = humanize.filesize.naturalsize(data_array.nbytes)
-    if data_array.nbytes > MAX_ALLOWED_COMPUTE_SIZE:
-        raise DataSizeTooLargeError(data_array.nbytes)
-    log.info("Processing DataArray of size %s", size_str)
 
 
 # This wraps compute_dask_array() to customize the docstring which is part of
 # ScientificPythonAgent's prompt.
-def compute(data_array: xr.DataArray) -> xr.DataArray:
+async def compute(data_array: xr.DataArray) -> MaterializedDataArray:
     """Wraps data_array.compute() to correctly handle async dask clients.
 
     Always use this function instead of directly calling .compute(). Also,
     always call this function on a data_array before calling .values or
     .to_numpy() or .as_numpy() or .item() etc.
     """
-    return compute_dask_array(data_array)
-
-
-def compute_dask_array(data_array: xr.DataArray) -> xr.DataArray:
-    """Convert to non-lazy array, accounting for possibly async dask client.
-
-    - If data_array is not a dask array, return it as is.
-    - If data_array is already computed, return it as is.
-    - If there is no active dask client, call data_array.compute() directly.
-    - If dask client is asynchronous, use asyncio.run() to run computation.
-    - If dask client is synchronous, use client.sync() to run computation.
-    - If computation does not result in a DataArray, raise an error.
-
-    Raises:
-        DaskComputeError: If computation fails for any reason.
-    """
-    if data_array.chunks is None:
-        # not a dask array
-        return data_array
-
-    validate_data_array_size_within_limit(data_array)
-
-    try:
-        client = get_client()
-    except ValueError:
-        # no active Dask client, compute directly
-        return data_array.compute()  # type: ignore[reportUnknownMemberType]
-
-    # client.compute()'s docs say that it returns a Future or list of Futures,
-    # but its inferred return type is:
-    #     Unknown |
-    #     Generator[Generator[Unknown, None, None] |
-    #     CoroutineType[Any, Any, Unknown] | Unknown, None, None] |
-    #     CoroutineType[Any, Any, Unknown] |
-    #     list[Unknown]  # noqa: ERA001
-    # Hence the extra type checks below.
-    compute_output = client.compute(data_array)  # type: ignore[reportUnknownMemberType]
-
-    if isinstance(compute_output, xr.DataArray):
-        return compute_output
-
-    if not isinstance(compute_output, Future):
-        msg = (
-            "client.compute() returned unexpected type "
-            f"{type(compute_output)}."  # type: ignore[reportUnknownArgumentType]
-        )
-        raise DaskComputeError(msg)
-
-    try:
-        # sync or await result depending on client state
-        if client.asynchronous:
-            coroutine = compute_output.result()  # type: ignore[reportUnknownMemberType]
-            result = asyncio.run(coroutine)  # type: ignore[reportUnknownArgumentType]
-        else:
-            result = client.sync(compute_output.result)  # type: ignore[reportUnknownMemberType]
-    except Exception as e:
-        method = "asyncio.run()" if client.asynchronous else "client.sync()"
-        msg = f"Error encountered when calling {method} on .compute() output."
-        raise DaskComputeError(msg) from e
-
-    if not isinstance(result, xr.DataArray):
-        method = "asyncio.run()" if client.asynchronous else "client.sync()"
-        msg = f"{method} returned unexpected type {type(result)}."  # type: ignore[reportUnknownArgumentType]
-        raise DaskComputeError(msg)
-
-    return result
+    return await compute_dask_array(data_array)
 
 
 def geographic_coords_to_decimal_coords(coords: str) -> float:
@@ -182,7 +94,7 @@ def filter_data_array(
     return data_array.sel(indexers)  # type: ignore[reportUnknownMemberType]
 
 
-def max_coords(data_array: xr.DataArray) -> dict[str, str | float]:
+async def max_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     """Return the coords, along each dim, of the maximum value in data_array.
 
     Also returns the actual value at the point.
@@ -203,19 +115,19 @@ def max_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     }
     """
     tmp: dict[str, xr.DataArray] = data_array.argmax(dim=...)  # type: ignore[reportAssignmentType]
-    tmp = {k: compute_dask_array(v) for k, v in tmp.items()}
+    tmp = {k: await compute_dask_array(v) for k, v in tmp.items()}
     out = {  # type: ignore[reportUnknownVariableType]
-        k: compute_dask_array(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
+        k: (await compute_dask_array(data_array.coords[k][v.to_numpy()])).to_numpy()  # type: ignore[reportAssignmentType]
         for k, v in tmp.items()
     }
     out["time"] = str(np.datetime_as_string(out["time"]))  # type: ignore[reportArgumentType]
     out["lat"] = round(out["lat"].item(), 6)  # type: ignore[reportArgumentType]
     out["lon"] = round(out["lon"].item(), 6)  # type: ignore[reportArgumentType]
-    out["value"] = compute_dask_array(data_array.max()).values.item()  # type: ignore[reportMemberType]
+    out["value"] = (await compute_dask_array(data_array.max())).values.item()  # type: ignore[reportMemberType]
     return out  # type: ignore[reportUnknownVariableType]
 
 
-def min_coords(data_array: xr.DataArray) -> dict[str, str | float]:
+async def min_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     """Return the coords, along each dim, of the minimum value in data_array.
 
     Also returns the actual value at the point.
@@ -236,15 +148,15 @@ def min_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     }
     """
     tmp: dict[str, xr.DataArray] = data_array.argmin(dim=...)  # type: ignore[reportAssignmentType]
-    tmp = {k: compute_dask_array(v) for k, v in tmp.items()}
+    tmp = {k: await compute_dask_array(v) for k, v in tmp.items()}
     out = {  # type: ignore[reportUnknownVariableType]
-        k: compute_dask_array(data_array.coords[k][v.to_numpy()]).to_numpy()  # type: ignore[reportAssignmentType]
+        k: (await compute_dask_array(data_array.coords[k][v.to_numpy()])).to_numpy()  # type: ignore[reportAssignmentType]
         for k, v in tmp.items()
     }
     out["time"] = str(np.datetime_as_string(out["time"]))  # type: ignore[reportArgumentType]
     out["lat"] = round(out["lat"].item(), 6)  # type: ignore[reportArgumentType]
     out["lon"] = round(out["lon"].item(), 6)  # type: ignore[reportArgumentType]
-    out["value"] = compute_dask_array(data_array.min()).values.item()  # type: ignore[reportMemberType]
+    out["value"] = (await compute_dask_array(data_array.min())).values.item()  # type: ignore[reportMemberType]
     return out  # type: ignore[reportUnknownVariableType]
 
 
@@ -255,25 +167,30 @@ def min_coords(data_array: xr.DataArray) -> dict[str, str | float]:
     reraise=True,
 )
 @observe()
-def geocode_natural_language_description(place_lookup: PlaceLookup, text: str) -> Polygon:
+async def geocode_natural_language_description(
+    place_lookup: PlaceLookup, bedrock_client: BedrockRuntimeClient, text: str
+) -> BaseGeometry:
     """Geocode natural language description of an area into a shapely geometry.
 
     Args:
-        place_lookup: Implementation of place lookup for natural language geocoding.
-        text: Natural language description of a location. Example inputs:
-            "Caspian Sea", "within 1 mile of the coast of Boston",
-            "Florida north of Miami", etc.
+        place_lookup (PlaceLookup): Implementation of place lookup for natural
+            language geocoding.
+        bedrock_client (BedrockRuntimeClient): Bedrock Client to be use in the place lookup.
+        text (str): Natural language description of a location. Example inputs:
+            "Caspian Sea", "within 1 mile of the coast of Boston", "Florida
+            north of Miami", etc.
 
     Returns:
-        Shapely Polygon in EPSG:4326 coords representing the location.
+        Shapely geometry in EPSG:4326 coords representing the location.
     """
     os.environ["NOMINATIM_USER_AGENT"] = "e84_nl_geocoding"
-    llm = BedrockClaudeLLM()
-    geometry = extract_geometry_from_text(llm, text=text, place_lookup=place_lookup)
-    return geometry_to_polygon(geometry)
+    llm = BedrockClaudeLLM(client=bedrock_client)
+    return await to_thread.run_sync(extract_geometry_from_text, llm, text, place_lookup)
 
 
-def polygon_to_mask(polygon: Polygon, data_array: xr.DataArray) -> npt.NDArray[np.bool_]:
+def polygon_to_mask(
+    polygon: Polygon | MultiPolygon, data_array: xr.DataArray
+) -> npt.NDArray[np.bool_]:
     """Create spatial mask from polygon for (time, lat, lon) data_array.
 
     Args:
@@ -310,24 +227,22 @@ def polygon_to_mask(polygon: Polygon, data_array: xr.DataArray) -> npt.NDArray[n
 
 
 def mask_data_array_with_polygon(
-    data_array: xr.DataArray,
-    polygon: Polygon,
-) -> xr.DataArray:
-    """Mask out data_array with polygon, optionally cropping to polygon bounds.
+    data_array: xr.DataArray, polygon: Polygon | MultiPolygon
+) -> SpatiallyMaskedDataArray:
+    """Mask out data_array with polygon, without cropping.
 
     Equivalent to converting the polygon to a binary mask and then calling
-    data_array.where(mask, drop=True).
+    data_array.where(mask, drop=False).
 
     Args:
         polygon: Shapely Polygon in EPSG:4326 coords.
         data_array: DataArray of shape (time, lat, lon).
-        crop: If True, crop data_array to the rectangular bounds of the
-            polygon. Defaults to False.
 
     Returns:
-        A DataArray with NaN values for coords falling outside the polygon. If
-        crop=False, the output shape is the same as the input shape. If
-        crop=True the output shape might be smaller in the spatial dimensions.
+        A DataArray with NaN values for coords falling outside the polygon. The
+        output shape is the same as the input shape. The fraction of lat/lon cells kept is recorded
+        in the ``SPATIAL_VALID_FRACTION_ATTR`` attribute so downstream size checks can count only
+        the masked region rather than the full (mostly-NaN) bounding box.
     """
     mask = polygon_to_mask(polygon, data_array)
     mask_da = xr.DataArray(
@@ -335,5 +250,8 @@ def mask_data_array_with_polygon(
         dims=("lat", "lon"),
         coords={"lat": data_array["lat"], "lon": data_array["lon"]},
     )
-    out = data_array.where(mask_da, drop=True)
-    return out
+    # drop=False leaves shape unchanged, fills NaNs outside mask
+    out = data_array.where(mask_da, drop=False)
+    # `mask` is an in-memory numpy array, so this is cheap (no Dask compute).
+    out.attrs[SPATIAL_VALID_FRACTION_ATTR] = float(mask.mean())
+    return SpatiallyMaskedDataArray(out)

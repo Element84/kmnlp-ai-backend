@@ -1,23 +1,22 @@
 import logging
-from json import JSONDecodeError
+from functools import partial
+from typing import TYPE_CHECKING, Self
 
-from anyio import from_thread
-from e84_geoai_common.util import timed_function
-from langfuse import observe  # type: ignore[reportUnknownVariableType]
-from pydantic import BaseModel, ConfigDict, Field
+from anyio.to_thread import run_sync
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_ai import RunContext
 
 from llm_agent.agents.dataset_picking_agent.dataset_picking_agent import (
     DatasetPickingAgent,
-    DatasetResponseTextContent,
-    MaxPromptTurnsExceededError,
-    UnableToExtractJSONFromStringError,
-    UnexpectedResponseTypeError,
+    DatasetSearchQuery,
+    DatasetSearchResponse,
 )
-from llm_agent.context import ToolCallContext
+from llm_agent.context import AgentDeps
 from llm_agent.model.dataset import Dataset
-from llm_agent.tools.llm_tool_input import LLMToolInput
-from llm_agent.tools.llm_tool_typed import ErrorResponse, LLMToolTyped, ToolOutput
-from llm_agent.utils.utils import EnrichedValidationError
+from llm_agent.tools.agent_tool import AgentTool, ErrorResponse, ToolInput
+
+if TYPE_CHECKING:
+    from llm_agent.dao.knowledge_graph_dao import KnowledgeGraphDAO
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ dataset IDs to retrieve more results, if needed.
 """
 
 
-class _DataSearchToolQuery(LLMToolInput):
+class _DataSearchToolQuery(ToolInput):
     model_config = ConfigDict(
         # Title in the JSON schema, w/o leading underscore to reduce confusion.
         title="DataSearchToolQuery",
@@ -40,14 +39,36 @@ class _DataSearchToolQuery(LLMToolInput):
         frozen=True,
     )
 
-    natural_language_query: str
+    natural_language_query: str | None = Field(
+        default=None,
+        description="A natural language description of what you are looking for. This should be "
+        "in full sentences, not a list of keywords.",
+    )
+    keywords: list[str] | None = Field(
+        default=None,
+        description="Input for a keyword-based search as an alternative to a natural "
+        "language query.",
+    )
     dataset_ids: list[str] | None = Field(
         default=None,
         description="Specific dataset IDs to restrict the search to, if known. These can be used "
         "to specify datasets returned in a previous truncated search result. If specified, "
-        "natural_language_query will be ignored.",
+        "natural_language_query and keywords will be ignored.",
         max_length=MAX_NUM_RESULTS,
     )
+
+    @model_validator(mode="after")
+    def check_not_all_none(self) -> Self:
+        if (
+            self.natural_language_query is None
+            and (self.keywords is None or len(self.keywords) == 0)
+            and (self.dataset_ids is None or len(self.dataset_ids) == 0)
+        ):
+            msg = (
+                "At least one of natural_language_query, keywords, or dataset_ids must be provided."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class DataSearchToolResult(BaseModel):
@@ -55,6 +76,10 @@ class DataSearchToolResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    explanation: str | None = Field(
+        default=None,
+        description="Explanation of the search results from the sub-agent.",
+    )
     datasets: list[Dataset] = Field(
         description=f"List of datasets matching the search query, capped at {MAX_NUM_RESULTS}.",
         max_length=MAX_NUM_RESULTS,
@@ -74,97 +99,72 @@ class SearchInitiatedUpdate(BaseModel):
     query: str
 
 
-class DataSearchTool(
-    LLMToolTyped[_DataSearchToolQuery, DataSearchToolResult, DataSearchToolResult],
-):
-    """Tool to query to the dataset picking agent and return its responses."""
+class SearchCompletedUpdate(BaseModel):
+    """Event indicating a search has been completed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: str
+    num_datasets: int
+
+
+class DataSearchTool(AgentTool[_DataSearchToolQuery, DataSearchToolResult | ErrorResponse]):
+    """Tool that queries the dataset picking agent and returns its responses."""
+
+    name = "DataSearchTool"
+    description = TOOL_DESCRIPTION
+    input_model = _DataSearchToolQuery
+    output_type = DataSearchToolResult | ErrorResponse
 
     def __init__(self, dataset_picking_agent: DatasetPickingAgent) -> None:
         """Initializer."""
-        super().__init__(
-            name="DataSearchTool",
-            description=TOOL_DESCRIPTION,
-            input_model=_DataSearchToolQuery,
-            user_output_model=DataSearchToolResult,
-            llm_output_model=DataSearchToolResult,
-        )
         self._dataset_picking_agent = dataset_picking_agent
 
-    @observe(as_type="tool", name=__name__)
-    @timed_function()
-    def _execute_typed(
-        self, context: ToolCallContext, tool_input: _DataSearchToolQuery
-    ) -> ToolOutput[DataSearchToolResult, DataSearchToolResult] | ErrorResponse:
-        context.update_progress(SearchInitiatedUpdate(query=tool_input.natural_language_query))
-        # `from_thread.run` is used to call an asynchronous function from a
-        # synchronous function in a worker thread.
-        #
-        # From the perspective of the function, it effectively makes the
-        # asynchronous call synchronous. However, it does still respect `await`
-        # (relinquishing the CPU).
-        #
-        # DO NOT use `from_thread.run_sync` for this purpose. That method will
-        # run the relevant code on the main event loop thread.
-        out = from_thread.run(self._a_execute_data_search_tool, context, tool_input)
-        if isinstance(out, ErrorResponse):
-            return out
-        return ToolOutput(user=out, llm=out)
-
-    async def _a_execute_data_search_tool(
-        self, context: ToolCallContext, query_params: _DataSearchToolQuery
+    async def __call__(
+        self, ctx: RunContext[AgentDeps], tool_input: _DataSearchToolQuery, /
     ) -> DataSearchToolResult | ErrorResponse:
-        """Execute Data Search Tool asynchronlously."""
-        knowledge_graph_dao = context.global_context.knowledge_graph_dao
-        if query_params.dataset_ids:
-            # If dataset IDs are provided, fetch those specific datasets directly
-            dataset_ids = query_params.dataset_ids
+        """Search for relevant datasets, delegating to the dataset picking agent."""
+        knowledge_graph_dao = ctx.deps.chat_context.global_context.knowledge_graph_dao
+        if tool_input.dataset_ids:
+            # If dataset IDs are provided, fetch those specific datasets directly.
+            dataset_ids = tool_input.dataset_ids
             included_ids, truncated_ids = (
                 dataset_ids[:MAX_NUM_RESULTS],
                 dataset_ids[MAX_NUM_RESULTS:],
             )
-            datasets = knowledge_graph_dao.fetch_datasets(ids=included_ids)
-            return DataSearchToolResult(datasets=datasets)
+            datasets = await run_sync(partial(knowledge_graph_dao.fetch_datasets, ids=included_ids))
+            return DataSearchToolResult(
+                explanation=None, datasets=datasets, truncated_dataset_ids=truncated_ids or None
+            )
 
-        try:
-            parsed_responses = [
-                content
-                async for assistant_message in self._dataset_picking_agent.run(
-                    context.global_context, query_params.natural_language_query
-                )
-                for content in assistant_message.parsed_content
-                if (isinstance(content, DatasetResponseTextContent))
-            ]
+        query = tool_input.natural_language_query or ", ".join(tool_input.keywords or [])
+        ctx.deps.update_progress(ctx, SearchInitiatedUpdate(query=query))
 
-        except (
-            JSONDecodeError,
-            EnrichedValidationError,
-            UnexpectedResponseTypeError,
-            MaxPromptTurnsExceededError,
-            UnableToExtractJSONFromStringError,
-        ) as e:
-            message: str
-            match e:
-                case JSONDecodeError():
-                    message = "Error parsing JSON response"
-
-                case EnrichedValidationError():
-                    message = "Validation error parsing dataset"
-
-                case UnexpectedResponseTypeError():
-                    message = "Unexpected response content type"
-
-                case MaxPromptTurnsExceededError():
-                    message = "Max tool use turns in DatasetPickingAgent"
-
-                case UnableToExtractJSONFromStringError():
-                    message = "Error extracting JSON from response"
-
-            return ErrorResponse(message=message)
-
-        dataset_ids = [id_ for response in parsed_responses for id_ in response.result or []]
-        included_ids, truncated_ids = dataset_ids[:MAX_NUM_RESULTS], dataset_ids[MAX_NUM_RESULTS:]
-        datasets = knowledge_graph_dao.fetch_datasets(ids=included_ids)
-        return DataSearchToolResult(
-            datasets=datasets,
-            truncated_dataset_ids=truncated_ids or None,
+        response = await self._dataset_picking_agent.run(
+            ctx.deps.chat_context,
+            DatasetSearchQuery(query=query),
+            progress_callback=ctx.deps.make_progress_callback_for_nested_tool(ctx),
         )
+
+        tool_result = await _dataset_picking_agent_response_to_tool_result(
+            response, knowledge_graph_dao
+        )
+
+        ctx.deps.update_progress(
+            ctx, SearchCompletedUpdate(query=query, num_datasets=len(tool_result.datasets))
+        )
+
+        return tool_result
+
+
+async def _dataset_picking_agent_response_to_tool_result(
+    response: DatasetSearchResponse, knowledge_graph_dao: "KnowledgeGraphDAO"
+) -> DataSearchToolResult:
+    dataset_ids = response.result or []
+    included_ids, truncated_ids = dataset_ids[:MAX_NUM_RESULTS], dataset_ids[MAX_NUM_RESULTS:]
+    datasets = await run_sync(partial(knowledge_graph_dao.fetch_datasets, ids=included_ids))
+    return DataSearchToolResult(
+        explanation=response.explanation,
+        datasets=datasets,
+        truncated_dataset_ids=truncated_ids or None,
+    )

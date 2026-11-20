@@ -8,14 +8,24 @@ from llm_agent.agents.algorithm_agent.algorithm.function_sets.data_array_functio
     SpatioTemporalDataArrayFunctionSet,
     TemporalDataArrayFunctionSet,
 )
-from llm_agent.agents.algorithm_agent.algorithm.function_sets.general_plot_functions import (
+from llm_agent.agents.algorithm_agent.algorithm.function_sets.plot import (
+    ContourPlottingFunctionSet,
+    EnsemblePlottingFunctionSet,
     GeneralPlottingFunctionSet,
+    GeospatialPlottingFunctionSet,
+    SSTPlottingFunctionSet,
+    WindPlottingFunctionSet,
 )
 
 __all__ = [
+    "ContourPlottingFunctionSet",
+    "EnsemblePlottingFunctionSet",
     "FunctionSet",
     "GeneralDataArrayFunctionSet",
     "GeneralPlottingFunctionSet",
+    "GeospatialPlottingFunctionSet",
+    "SSTPlottingFunctionSet",
     "SpatioTemporalDataArrayFunctionSet",
     "TemporalDataArrayFunctionSet",
+    "WindPlottingFunctionSet",
 ]

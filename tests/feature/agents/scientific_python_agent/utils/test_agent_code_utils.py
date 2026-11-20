@@ -51,9 +51,9 @@ def test_mask_wind_speed_data_array_with_black_sea_polygon(
 
 
 def test_mask_wind_speed_data_array_with_gulf_of_mexico_polygon(
-    sst_data_array: xr.DataArray, gulf_of_mexico_geometry: "BaseGeometry"
+    wind_speed_data_array: xr.DataArray, gulf_of_mexico_geometry: "BaseGeometry"
 ):
-    data_array = sst_data_array
+    data_array = wind_speed_data_array
 
     assert isinstance(gulf_of_mexico_geometry, Polygon)
 

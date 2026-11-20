@@ -9,7 +9,7 @@ from llm_agent.model.variable import Variable
 class DatasetSource(BaseModel):
     """Source information for a dataset."""
 
-    format: Literal["zarr", "kerchunk-parquet"] = Field(
+    format: Literal["zarr", "icechunk-zarr", "kerchunk-parquet"] = Field(
         description="The file format of the dataset."
     )
     uri: str = Field(description="URI at which the dataset can be accessed.")

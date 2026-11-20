@@ -2,13 +2,13 @@ import logging
 from importlib.resources import files
 from string import Template
 
-from langfuse import observe  # type: ignore[reportUnknownVariableType]
+from anyio.to_thread import run_sync
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai import RunContext
 
 import llm_agent.data
-from llm_agent.context import ToolCallContext
-from llm_agent.tools.llm_tool_input import LLMToolInput
-from llm_agent.tools.llm_tool_typed import LLMToolTyped, ToolOutput
+from llm_agent.context import AgentDeps
+from llm_agent.tools.agent_tool import AgentTool, ToolInput
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ ${shacl}
 """)
 
 
-class _ExecuteSparqlQueryToolQuery(LLMToolInput):
+class _ExecuteSparqlQueryToolQuery(ToolInput):
     """Query arguments for the `ExecuteSparqlQueryTool`.
 
     Execute the provided SPARQL read query on the system's knowledge graph.
@@ -57,36 +57,29 @@ class _ExecuteSparqlQueryToolResult(BaseModel):
 
 
 class ExecuteSparqlQueryTool(
-    LLMToolTyped[
-        _ExecuteSparqlQueryToolQuery, _ExecuteSparqlQueryToolResult, _ExecuteSparqlQueryToolResult
-    ]
+    AgentTool[_ExecuteSparqlQueryToolQuery, _ExecuteSparqlQueryToolResult]
 ):
     """Tool to execute arbitrary Sparql queries on the knowledge graph."""
+
+    name = "ExecuteSparqlQueryTool"
+    input_model = _ExecuteSparqlQueryToolQuery
+    output_type = _ExecuteSparqlQueryToolResult
 
     def __init__(self) -> None:
         """Initializer."""
         shacl = SHACL_FILE_PATH.read_text()
+        self.description = TOOL_DESCRIPTION.substitute({"shacl": shacl})
 
-        super().__init__(
-            name="ExecuteSparqlQueryTool",
-            description=TOOL_DESCRIPTION.substitute({"shacl": shacl}),
-            input_model=_ExecuteSparqlQueryToolQuery,
-            user_output_model=_ExecuteSparqlQueryToolResult,
-            llm_output_model=_ExecuteSparqlQueryToolResult,
-        )
-
-    @observe(as_type="tool", name=__name__)
-    def _execute_typed(
+    async def __call__(
         self,
-        context: ToolCallContext,
+        ctx: RunContext[AgentDeps],
         tool_input: _ExecuteSparqlQueryToolQuery,
-    ) -> ToolOutput[_ExecuteSparqlQueryToolResult, _ExecuteSparqlQueryToolResult]:
-        res = _ExecuteSparqlQueryToolResult(
-            result=context.global_context.knowledge_graph_dao.execute_read_only_query(
-                tool_input.sparql_query
-            )
+        /,
+    ) -> _ExecuteSparqlQueryToolResult:
+        """Execute the provided SPARQL read query against the knowledge graph."""
+        knowledge_graph_dao = ctx.deps.chat_context.global_context.knowledge_graph_dao
+        # The knowledge graph query is blocking; run it off the event loop.
+        result = await run_sync(
+            knowledge_graph_dao.execute_read_only_query, tool_input.sparql_query
         )
-
-        log.debug("Tool call result: %s", res)
-
-        return ToolOutput(user=res, llm=res)
+        return _ExecuteSparqlQueryToolResult(result=result)

@@ -50,6 +50,7 @@ class TestInputVarModels:
         with pytest.raises(ValidationError):
             _ = SpatioTemporalDataArrayVariable(
                 name="name",
+                dataset_name="dataset_name",
                 variable_type="DataArray",
                 description="description",
                 units="unit",
@@ -72,6 +73,7 @@ class TestInputVariableFromModel:
     def test_spatiotemporal(self):
         variable = Variable(
             id="http://some/thing/with/a/name",
+            dataset_name="dataset_name",
             field_name="name",
             name="label",
             description="description",
@@ -83,8 +85,10 @@ class TestInputVariableFromModel:
         assert isinstance(input_variable, SpatioTemporalDataArrayVariable)
         assert input_variable.model_dump(mode="json") == {
             "name": "name",
+            "dataset_name": "dataset_name",
             "variable_type": "DataArray",
             "description": "description",
+            "standard_name": None,
             "dimensions": [
                 {
                     "field_name": "lat",
@@ -115,6 +119,7 @@ class TestInputVariableFromModel:
     def test_temporal(self):
         variable = Variable(
             id="http://some/thing/with/a/name",
+            dataset_name="dataset_name",
             field_name="name",
             name="label",
             description="description",
@@ -126,8 +131,10 @@ class TestInputVariableFromModel:
         assert isinstance(input_variable, TemporalDataArrayVariable)
         assert input_variable.model_dump(mode="json") == {
             "name": "name",
+            "dataset_name": "dataset_name",
             "variable_type": "DataArray",
             "description": "description",
+            "standard_name": None,
             "dimensions": [
                 {
                     "field_name": "time",
@@ -151,6 +158,7 @@ class TestInputVariableFromModel:
     def test_general(self):
         variable = Variable(
             id="http://some/thing/with/a/name",
+            dataset_name="dataset_name",
             field_name="name",
             name="label",
             description="description",
@@ -167,8 +175,10 @@ class TestInputVariableFromModel:
 
         assert input_variable.model_dump(mode="json") == {
             "name": "name",
+            "dataset_name": "dataset_name",
             "variable_type": "DataArray",
             "description": "description",
+            "standard_name": None,
             "dimensions": [
                 {
                     "field_name": "x",
@@ -197,6 +207,7 @@ class TestInputVarsToFunctionSet:
     def test_spatiotemporal(self):
         input_var = SpatioTemporalDataArrayVariable(
             name="name",
+            dataset_name="dataset_name",
             variable_type="DataArray",
             description="description",
             dimensions=[dims["time"], dims["lat"], dims["lon"]],
@@ -221,6 +232,7 @@ class TestInputVarsToFunctionSet:
     def test_temporal(self):
         input_var = TemporalDataArrayVariable(
             name="name",
+            dataset_name="dataset_name",
             variable_type="DataArray",
             description="description",
             dimensions=[dims["time"], dims["wavelength"]],
@@ -244,6 +256,7 @@ class TestInputVarsToFunctionSet:
     def test_general(self):
         input_var = GeneralDataArrayVariable(
             name="name",
+            dataset_name="dataset_name",
             variable_type="DataArray",
             description="description",
             units="unit",

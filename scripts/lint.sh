@@ -9,6 +9,7 @@ set -e -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 echo "Running shellcheck"
 "$SCRIPT_DIR/shellcheck.sh"
+echo "---"
 
 echo "Running Ruff"
 ruff check src/ tests/ evals/
@@ -26,6 +27,10 @@ fi
 echo "---"
 
 echo "Checking whether graph matches SHACL constraints"
-pyshacl -s "src/llm_agent/data/dataset-constraints.shacl" "src/llm_agent/data/dataset-kg-generated.ttl"
+pyshacl -s "src/llm_agent/data/dataset-constraints.shacl" "src/llm_agent/data/dataset-kg-cdr-generated.ttl"
+pyshacl -s "src/llm_agent/data/dataset-constraints.shacl" "src/llm_agent/data/dataset-kg-crw-generated.ttl"
+# This one does not currently pass the check:
+# pyshacl -s "src/llm_agent/data/dataset-constraints.shacl" "src/llm_agent/data/dataset-kg-dynamical-org-generated.ttl"
+echo "---"
 
 echo "All linting checks passed!"

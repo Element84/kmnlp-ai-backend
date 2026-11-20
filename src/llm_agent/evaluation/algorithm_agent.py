@@ -1,20 +1,19 @@
 # Ignore warnings about missing public method docstrings since their purpose is
 # obvious.
 # ruff: noqa: D102
-
-import json
 import logging
 from collections import Counter
-from typing import Any, Self
+from typing import Any, Literal, Self, cast
 from unittest.mock import Mock
 
 import anyio
-from e84_geoai_common.llm.core import LLMInferenceConfig
-from e84_geoai_common.llm.models.claude import (
-    CLAUDE_BEDROCK_MODEL_IDS,
-    BedrockClaudeLLM,
-)
-from pydantic import BaseModel, model_validator
+from chromadb import EphemeralClient
+from e84_geoai_common.llm.models.claude import CLAUDE_4_5_HAIKU
+from pydantic import BaseModel, computed_field, field_validator, model_validator
+from pydantic_ai import UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.models.bedrock import BedrockModelSettings
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.usage import RunUsage
 from rich.pretty import pretty_repr
 from tqdm import tqdm
 
@@ -25,6 +24,7 @@ from llm_agent.agents.algorithm_agent.algorithm.base import (
 )
 from llm_agent.agents.algorithm_agent.algorithm_agent import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_NUM_RETRIES,
     AlgorithmAgent,
 )
 from llm_agent.agents.algorithm_agent.interface import (
@@ -32,8 +32,8 @@ from llm_agent.agents.algorithm_agent.interface import (
     AlgorithmSolutionSpec,
     input_vars_to_function_set,
 )
-from llm_agent.agents.tool_only_agent import MaxAllowedToolCallsExceededError
 from llm_agent.context import LLMAgentContext
+from llm_agent.dao.chromadb_embedding_dao import ChromaDBEmbeddingDAO
 from llm_agent.dao.knowledge_graph_dao import KnowledgeGraphDAO
 from llm_agent.evaluation.base_eval import (
     BaseEvaluator,
@@ -43,17 +43,24 @@ from llm_agent.evaluation.base_eval import (
     ExperimentConfig,
     SingleEvalResult,
 )
-from llm_agent.evaluation.utils import SummaryStats
-from llm_agent.tools.llm_tool_typed import ErrorResponse
-from llm_agent.utils.utils import EnrichedLLMToolResultContent, EnrichedValidationError
+from llm_agent.evaluation.utils import MockChatContext, SummaryStats, build_eval_client
+from llm_agent.model_factory import make_bedrock_model
+from llm_agent.repository.embedding_index_repository import EmbeddingIndexRepository
 
 log = logging.getLogger(__name__)
 
-context = LLMAgentContext(
-    place_lookup=Mock(),
-    s3_client=Mock(),
-    knowledge_graph_dao=KnowledgeGraphDAO(),
-    dask_client=Mock(),
+
+context = MockChatContext(
+    LLMAgentContext(
+        place_lookup=Mock(),
+        knowledge_graph_dao=KnowledgeGraphDAO(),
+        embedding_repo=EmbeddingIndexRepository(
+            ChromaDBEmbeddingDAO(EphemeralClient(), "datasets"),
+            KnowledgeGraphDAO().fetch_datasets(),
+        ),
+        dask_client=Mock(),
+        bedrock_client=Mock(),
+    )
 )
 
 
@@ -65,6 +72,8 @@ class AlgorithmAgentExperimentConfig(BaseModel):
     dataset_version: str
     model_name: str
     temperature: float
+    thinking: bool | Literal["minimal", "low", "medium", "high", "xhigh"] = False
+    num_retries: int = DEFAULT_NUM_RETRIES
 
     @staticmethod
     def from_eval_exp_config(
@@ -87,6 +96,8 @@ class AlgorithmAgentExperimentConfig(BaseModel):
             params={
                 "model_name": self.model_name,
                 "temperature": self.temperature,
+                "thinking": self.thinking,
+                "num_retries": self.num_retries,
             },
         )
 
@@ -96,9 +107,32 @@ class AlgorithmAgentEvalInput[FunctionCallT: BaseFunctionCall](BaseModel):
 
     id: str
     problem: AlgorithmProblemSpec
-    reference_solution: AlgorithmSolutionSpec[FunctionCallT]
+    reference_solution: (
+        AlgorithmSolutionSpec[FunctionCallT] | list[AlgorithmSolutionSpec[FunctionCallT]]
+    )
     problem_attrs: "AlgorithmAgentProblemAttrs | None" = None
     solution_attrs: "AlgorithmAgentSolutionAttrs | None" = None
+    # Ops the agent may emit beyond the reference without penalty (valid optimizations,
+    # e.g. a loose bbox slice before a polygon filter). Each listed occurrence forgives one
+    # extra occurrence of that op.
+    allowed_extra_ops: list[str] = []
+
+    @field_validator("reference_solution")
+    @classmethod
+    def _reject_empty_reference_list(
+        cls,
+        v: "AlgorithmSolutionSpec[FunctionCallT] | list[AlgorithmSolutionSpec[FunctionCallT]]",
+    ) -> "AlgorithmSolutionSpec[FunctionCallT] | list[AlgorithmSolutionSpec[FunctionCallT]]":
+        if isinstance(v, list) and not v:
+            msg = "reference_solution must not be an empty list."
+            raise ValueError(msg)
+        return v
+
+    @property
+    def reference_solutions(self) -> list[AlgorithmSolutionSpec[FunctionCallT]]:
+        """Reference solution(s) normalized to a list."""
+        ref = self.reference_solution
+        return ref if isinstance(ref, list) else [ref]
 
     @model_validator(mode="after")
     def _init_problem_attrs(self) -> Self:
@@ -113,11 +147,12 @@ class AlgorithmAgentEvalInput[FunctionCallT: BaseFunctionCall](BaseModel):
     @model_validator(mode="after")
     def _init_solution_attrs(self) -> Self:
         if self.solution_attrs is None:
+            primary = self.reference_solutions[0]
             self.solution_attrs = AlgorithmAgentSolutionAttrs(
-                num_statements=len(self.reference_solution.algorithm.statements),
-                num_outputs=len(self.reference_solution.algorithm.output_variables),
-                ops=_get_algorithm_ops(self.reference_solution.algorithm),
-                is_refusal=(self.reference_solution.error_message is not None),
+                num_statements=len(primary.algorithm.statements),
+                num_outputs=len(primary.algorithm.output_variables),
+                ops=_get_algorithm_ops(primary.algorithm),
+                is_refusal=any(bool(s.error_message) for s in self.reference_solutions),
             )
         return self
 
@@ -128,12 +163,21 @@ class AlgorithmAgentEvalInput[FunctionCallT: BaseFunctionCall](BaseModel):
         problem = AlgorithmProblemSpec.model_validate(eval_input.input)
         function_set = input_vars_to_function_set(problem.inputs_provided)
         function_call_type = make_function_call_model(function_set.functions)
+        solution_type = AlgorithmSolutionSpec[function_call_type]
+        reference_output = eval_input.reference_output
+        if isinstance(reference_output, dict) and isinstance(
+            reference_output.get("solutions"), list
+        ):
+            reference_solution = [
+                solution_type.model_validate(s) for s in reference_output["solutions"]
+            ]
+        else:
+            reference_solution = solution_type.model_validate(reference_output)
         alg_eval_input = AlgorithmAgentEvalInput[function_call_type](
             id=eval_input.id,
             problem=AlgorithmProblemSpec.model_validate(eval_input.input),
-            reference_solution=AlgorithmSolutionSpec[function_call_type].model_validate(
-                eval_input.reference_output
-            ),
+            reference_solution=reference_solution,
+            allowed_extra_ops=(eval_input.attrs or {}).get("allowed_extra_ops", []),
         )
         return alg_eval_input, function_call_type
 
@@ -143,11 +187,19 @@ class AlgorithmAgentEvalInput[FunctionCallT: BaseFunctionCall](BaseModel):
             attrs.update(**self.problem_attrs.model_dump())
         if self.solution_attrs is not None:
             attrs.update(**self.solution_attrs.model_dump())
+        attrs["allowed_extra_ops"] = self.allowed_extra_ops
+
+        # A single solution keeps the legacy flat shape; a list is wrapped under "solutions".
+        ref = self.reference_solution
+        if isinstance(ref, list):
+            reference_output: dict[str, Any] = {"solutions": [s.model_dump() for s in ref]}
+        else:
+            reference_output = ref.model_dump()
 
         return EvalInput(
             id=self.id,
             input=self.problem.model_dump(),
-            reference_output=self.reference_solution.model_dump(),
+            reference_output=reference_output,
             attrs=attrs,
         )
 
@@ -181,6 +233,24 @@ class AlgorithmAgentSingleEvalMetrics(BaseModel):
     matching_ops: list[str] | None = None
     missing_ops: list[str] | None = None
     extra_ops: list[str] | None = None
+    usage: RunUsage | None = None
+
+    @computed_field
+    @property
+    def correct(self) -> bool:
+        if self.is_refusal is None:
+            return False
+        if self.is_refusal:
+            return self.format_compliant and bool(self.schema_compliant)
+        # statement_count_diff is intentionally excluded: since every statement is an op, it is
+        # redundant with the ops check except when it disagrees with allowed_extra_ops forgiveness.
+        return (
+            self.format_compliant
+            and bool(self.schema_compliant)
+            and self.output_variables_count_diff == 0
+            and not bool(self.missing_ops)
+            and not bool(self.extra_ops)
+        )
 
 
 class ParsingFailure(BaseModel):
@@ -224,6 +294,7 @@ class AlgorithmAgentAggregatedMetrics(BaseModel):
     """Aggregated metrics."""
 
     num_tests: int
+    pct_correct: float = -1
     pct_format_compliant: float
     pct_schema_compliant: float
     pct_correct_refusal: float
@@ -231,6 +302,13 @@ class AlgorithmAgentAggregatedMetrics(BaseModel):
     pct_statement_count_mismatch: float
     pct_output_variables_count_mismatch: float
     pct_ops_mismatch: float
+    # Usage totals summed across all cases in the run (defaults keep older reports loadable).
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
+    total_requests: int = 0
+    total_tool_calls: int = 0
 
 
 class AlgorithmAgentEvalReport(BaseModel):
@@ -277,6 +355,7 @@ class AlgorithmAgentMultiRunMetrics(BaseModel):
     """Aggregated metrics, averaged over multiple experiment runs."""
 
     num_runs: int
+    pct_correct: SummaryStats
     pct_format_compliant: SummaryStats
     pct_schema_compliant: SummaryStats
     pct_correct_refusal: SummaryStats
@@ -284,6 +363,12 @@ class AlgorithmAgentMultiRunMetrics(BaseModel):
     pct_statement_count_mismatch: SummaryStats
     pct_output_variables_count_mismatch: SummaryStats
     pct_ops_mismatch: SummaryStats
+    total_input_tokens: SummaryStats
+    total_output_tokens: SummaryStats
+    total_cache_read_tokens: SummaryStats
+    total_cache_write_tokens: SummaryStats
+    total_requests: SummaryStats
+    total_tool_calls: SummaryStats
 
 
 class AlgorithmAgentMultiRunEvalReport(BaseModel):
@@ -323,6 +408,10 @@ class AlgorithmAgentEvaluator(BaseEvaluator):
     ) -> EvalReport:
         algo_dataset = [AlgorithmAgentEvalInput.from_eval_input(item) for item in dataset.items]
         algo_exp_config = AlgorithmAgentExperimentConfig.from_eval_exp_config(experiment_config)
+        log.info(
+            "AlgorithmAgentExperimentConfig: %s",
+            pretty_repr(algo_exp_config, indent_size=2),
+        )
         algo_report = await self._eval_dataset_typed(algo_exp_config, algo_dataset)
         eval_report = algo_report.to_eval_report()
         return eval_report
@@ -354,6 +443,46 @@ class AlgorithmAgentEvaluator(BaseEvaluator):
             aggregated_metrics=_aggregate_metrics(results),
         )
 
+    async def _make_agent[FunctionCallT: BaseFunctionCall](
+        self,
+        *,
+        experiment_config: AlgorithmAgentExperimentConfig,
+        inp: AlgorithmAgentEvalInput[FunctionCallT],
+        function_call_type: type[FunctionCallT],
+    ) -> AlgorithmAgent[FunctionCallT]:
+        if (
+            experiment_config.model_name == CLAUDE_4_5_HAIKU
+            and experiment_config.thinking == "high"
+        ):
+            # Thinking needs to be configured differently for the old Haiku 4.5 model.
+            log.info("Using special thinking config for Haiku 4.5")
+            model_settings = BedrockModelSettings(
+                temperature=experiment_config.temperature,
+                bedrock_additional_model_requests_fields={
+                    "thinking": {
+                        "type": "enabled",
+                        # The API requires max_tokens to be greater than the thinking budget
+                        "budget_tokens": DEFAULT_MAX_OUTPUT_TOKENS - 1,
+                    }
+                },
+            )
+        else:
+            model_settings = ModelSettings(
+                temperature=experiment_config.temperature,
+                thinking=experiment_config.thinking,
+            )
+        model = make_bedrock_model(
+            build_eval_client(),
+            model_id=experiment_config.model_name,
+            model_settings=model_settings,
+        )
+        return AlgorithmAgent(
+            model,
+            problem=inp.problem,
+            function_call_type=function_call_type,
+            num_retries=experiment_config.num_retries,
+        )
+
     async def _eval_single_case[FunctionCallT: BaseFunctionCall](
         self,
         *,
@@ -361,87 +490,36 @@ class AlgorithmAgentEvaluator(BaseEvaluator):
         inp: AlgorithmAgentEvalInput[FunctionCallT],
         function_call_type: type[FunctionCallT],
     ) -> AlgorithmAgentSingleEvalResult[FunctionCallT]:
-        llm = BedrockClaudeLLM(model_id=CLAUDE_BEDROCK_MODEL_IDS[experiment_config.model_name])
-        inference_cfg = LLMInferenceConfig(
-            temperature=experiment_config.temperature,
-            max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-        )
-        agent = AlgorithmAgent(
-            llm,
-            problem=inp.problem,
+        agent = await self._make_agent(
+            experiment_config=experiment_config,
+            inp=inp,
             function_call_type=function_call_type,
-            inference_cfg=inference_cfg,
         )
-        ref_soln_attrs = _get_solution_attrs(inp.reference_solution)
         try:
-            # FUTURE: do a more thorough refactoring of the evaluation now that
-            # agents returns a stream of outputs.
-            outputs: list[
-                EnrichedLLMToolResultContent[ErrorResponse]
-                | EnrichedLLMToolResultContent[AlgorithmSolutionSpec[FunctionCallT]]
-            ] = [
-                output
-                async for output in agent.run(
-                    context,
-                    conversation=[agent.input_to_message(inp.problem)],
-                )
-                if isinstance(output, EnrichedLLMToolResultContent)
-            ]
-            errors = [o.data for o in outputs if isinstance(o.data, ErrorResponse)]
-            valid_solution_attempts = [
-                o.data for o in outputs if isinstance(o.data, AlgorithmSolutionSpec)
-            ]
-            if len(valid_solution_attempts) == 0:
-                return AlgorithmAgentSingleEvalResult(
-                    input=inp,
-                    output=ParsingFailure(
-                        failed_output="",
-                        error_message=f"{errors!r}",
-                    ),
-                    metrics=AlgorithmAgentSingleEvalMetrics(
-                        format_compliant=True,
-                        schema_compliant=False,
-                    ),
-                )
-            solution = valid_solution_attempts[-1]
-
-        except json.JSONDecodeError as e:
+            solution, usage = await agent.run(context)
+            log.info("Usage: %s", usage)
+        except UsageLimitExceeded:
             return AlgorithmAgentSingleEvalResult(
+                # Raised when the agent cannot produce a valid, type-checked solution
+                # within its retry budget (the output validator raises ModelRetry on
+                # schema/type-check failures).
                 input=inp,
                 output=ParsingFailure(
-                    failed_output=e.doc,
-                    error_message=f"JSONDecodeError: {e!s}",
-                ),
-                metrics=AlgorithmAgentSingleEvalMetrics(
-                    format_compliant=False,
-                ),
-            )
-        except EnrichedValidationError as e:
-            # Pydantic ValidationError contains multiple sub-errors when
-            # validation fails. Each sub-error has an "input" field showing
-            # the invalid data. Since the same invalid input can trigger
-            # multiple validation rules, we extract and deduplicate the error
-            # inputs for clearer reporting.
-            error_inputs = [json.dumps(e["input"]) for e in e.error.errors()]
-            unique_error_inputs = list(set(error_inputs))
-            parsing_error = f"ValidationErrors:\n{pretty_repr(unique_error_inputs)}"
-            return AlgorithmAgentSingleEvalResult(
-                input=inp,
-                output=ParsingFailure(
-                    failed_output=e.data,
-                    error_message=parsing_error,
+                    failed_output="",
+                    error_message="Usage limit exceeded",
                 ),
                 metrics=AlgorithmAgentSingleEvalMetrics(
                     format_compliant=True,
                     schema_compliant=False,
                 ),
             )
-        except MaxAllowedToolCallsExceededError:
+        except UnexpectedModelBehavior as e:
+            # Usually raised when token budget exceeded.
             return AlgorithmAgentSingleEvalResult(
                 input=inp,
                 output=ParsingFailure(
                     failed_output="",
-                    error_message="Max allowed tool calls exceeded",
+                    error_message=f"{type(e).__name__}: {e!s}",
                 ),
                 metrics=AlgorithmAgentSingleEvalMetrics(
                     format_compliant=True,
@@ -449,7 +527,20 @@ class AlgorithmAgentEvaluator(BaseEvaluator):
                 ),
             )
 
-        if solution.error_message is not None:
+        return await self._eval_solution(
+            inp=inp,
+            solution=solution,
+            usage=usage,
+        )
+
+    async def _eval_solution[FunctionCallT: BaseFunctionCall](
+        self,
+        *,
+        inp: AlgorithmAgentEvalInput[FunctionCallT],
+        solution: AlgorithmSolutionSpec[FunctionCallT],
+        usage: RunUsage | None,
+    ) -> AlgorithmAgentSingleEvalResult[FunctionCallT]:
+        if solution.error_message:
             return AlgorithmAgentSingleEvalResult[FunctionCallT](
                 input=inp,
                 output=solution,
@@ -457,11 +548,16 @@ class AlgorithmAgentEvaluator(BaseEvaluator):
                     format_compliant=True,
                     schema_compliant=True,
                     is_refusal=True,
+                    usage=usage,
                 ),
             )
 
         gen_soln_attrs = _get_solution_attrs(solution)
-        matching_ops, missing_ops, extra_ops = _compare_ops(gen_soln_attrs.ops, ref_soln_attrs.ops)
+        ref_soln_attrs, matching_ops, missing_ops, extra_ops = _select_best_reference(
+            gen_soln_attrs.ops,
+            [_get_solution_attrs(s) for s in inp.reference_solutions],
+            inp.allowed_extra_ops,
+        )
 
         return AlgorithmAgentSingleEvalResult[FunctionCallT](
             input=inp,
@@ -480,8 +576,42 @@ class AlgorithmAgentEvaluator(BaseEvaluator):
                 matching_ops=matching_ops,
                 missing_ops=missing_ops,
                 extra_ops=extra_ops,
+                usage=usage,
             ),
         )
+
+    async def _reevaluate_report(self, report: EvalReport, dataset: EvalDataset) -> EvalReport:
+        """Re-score a single run report's stored solutions against the current dataset."""
+        current_inputs = {
+            item.id: AlgorithmAgentEvalInput.from_eval_input(item)[0] for item in dataset.items
+        }
+        typed_report = AlgorithmAgentEvalReport.from_eval_report(report)
+        rescored = [
+            await self._rescore_result(result, current_inputs.get(result.input.id))
+            for result in typed_report.results
+        ]
+        return AlgorithmAgentEvalReport(
+            experiment_config=typed_report.experiment_config,
+            results=rescored,
+            aggregated_metrics=_aggregate_metrics(rescored),
+        ).to_eval_report()
+
+    async def _rescore_result(
+        self,
+        result: AlgorithmAgentSingleEvalResult[Any],
+        current_input: "AlgorithmAgentEvalInput[BaseFunctionCall] | None",
+    ) -> AlgorithmAgentSingleEvalResult[Any]:
+        # Only generated solutions carry ops to re-score; parse/schema failures are left as-is.
+        if not isinstance(result.output, AlgorithmSolutionSpec):
+            return result
+        if current_input is None:
+            log.warning(
+                "Case %s is not in the current dataset; re-scoring against its stored reference.",
+                result.input.id,
+            )
+        inp = cast("AlgorithmAgentEvalInput[BaseFunctionCall]", current_input or result.input)
+        solution = cast("AlgorithmSolutionSpec[BaseFunctionCall]", result.output)
+        return await self._eval_solution(inp=inp, solution=solution, usage=result.metrics.usage)
 
     async def _aggregate_eval_reports(self, reports: list[EvalReport]) -> EvalReport:
         reports_custom = [AlgorithmAgentEvalReport.from_eval_report(r) for r in reports]
@@ -508,19 +638,42 @@ def _get_solution_attrs[FunctionCallT: BaseFunctionCall](
         num_statements=len(solution.algorithm.statements),
         num_outputs=len(solution.algorithm.output_variables),
         ops=ops,
-        is_refusal=(solution.error_message is not None),
+        is_refusal=bool(solution.error_message),
     )
 
 
-def _compare_ops(ops: list[str], ref_ops: list[str]) -> tuple[list[str], list[str], list[str]]:
+def _compare_ops(
+    ops: list[str], ref_ops: list[str], allowed_extra_ops: list[str] | None = None
+) -> tuple[list[str], list[str], list[str]]:
     ops_counts = Counter(ops)
     ref_ops_counts = Counter(ref_ops)
     ops_union = set(ref_ops_counts.keys()).union(set(ops_counts.keys()))
     diff = {op: ops_counts[op] - ref_ops_counts[op] for op in ops_union}
+    # Forgive up to `allowance` extra occurrences of ops the case marks as acceptable.
+    for op, allowance in Counter(allowed_extra_ops or []).items():
+        if diff.get(op, 0) > 0:
+            diff[op] = max(diff[op] - allowance, 0)
     matching_ops = [op for op, count in diff.items() if count == 0]
     missing_ops = [op for op, count in diff.items() if count < 0]
     extra_ops = [op for op, count in diff.items() if count > 0]
     return matching_ops, missing_ops, extra_ops
+
+
+def _select_best_reference(
+    gen_ops: list[str],
+    ref_attrs_options: list[AlgorithmAgentSolutionAttrs],
+    allowed_extra_ops: list[str] | None = None,
+) -> tuple[AlgorithmAgentSolutionAttrs, list[str], list[str], list[str]]:
+    """Score `gen_ops` against each reference and return the closest-matching one.
+
+    "Closest" = fewest missing+extra ops, tie-broken by most matching ops. This lets a case list
+    several equally valid solutions and be graded against whichever one the agent produced.
+    """
+    scored = [
+        (ref_attrs, *_compare_ops(gen_ops, ref_attrs.ops, allowed_extra_ops))
+        for ref_attrs in ref_attrs_options
+    ]
+    return min(scored, key=lambda s: (len(s[2]) + len(s[3]), -len(s[1])))
 
 
 def _pct_true(items: list[bool]) -> float:
@@ -559,6 +712,8 @@ def _aggregate_metrics[FunctionCallT: BaseFunctionCall](
         for r in results
         if (r.metrics.missing_ops is not None and r.metrics.extra_ops is not None)
     ]
+    correct = [r.metrics.correct for r in results]
+    usages = [r.metrics.usage for r in results if r.metrics.usage is not None]
     return AlgorithmAgentAggregatedMetrics(
         num_tests=len(results),
         pct_format_compliant=_pct_true(format_compliant),
@@ -568,6 +723,13 @@ def _aggregate_metrics[FunctionCallT: BaseFunctionCall](
         pct_statement_count_mismatch=_pct_true(statement_count_mismatch),
         pct_output_variables_count_mismatch=_pct_true(output_variables_count_mismatch),
         pct_ops_mismatch=_pct_true(ops_mismatch),
+        pct_correct=_pct_true(correct),
+        total_input_tokens=sum(u.input_tokens for u in usages),
+        total_output_tokens=sum(u.output_tokens for u in usages),
+        total_cache_read_tokens=sum(u.cache_read_tokens for u in usages),
+        total_cache_write_tokens=sum(u.cache_write_tokens for u in usages),
+        total_requests=sum(u.requests for u in usages),
+        total_tool_calls=sum(u.tool_calls for u in usages),
     )
 
 
@@ -575,7 +737,7 @@ def _get_algorithm_ops[FunctionCallT: BaseFunctionCall](
     algorithm: Algorithm[FunctionCallT],
 ) -> list[str]:
     return [
-        type(s.value.func).__name__
+        s.value.func.func_name
         for s in algorithm.statements
         if isinstance(s.value, BaseFunctionCall)
     ]

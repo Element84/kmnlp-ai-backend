@@ -1,11 +1,6 @@
-from e84_geoai_common.llm.models.claude import BedrockClaudeLLM
-from e84_geoai_common.llm.tests.mock_bedrock_runtime import (
-    _MockBedrockRuntimeClient,  # type: ignore[reportPrivateUsage]
-    claude_response_with_content,
-    make_test_bedrock_runtime_client,
-)
+import pytest
+from pydantic_ai.models.test import TestModel
 
-from llm_agent import PYTHON_AGENT_DEFAULT_LLM_MODEL_ID
 from llm_agent.agents.scientific_python_agent import ScientificPythonAgent
 
 SETUP_CODE = """\
@@ -219,8 +214,9 @@ Dataset attributes:
 """  # noqa: E501
 
 
-def test_response_parsing_for_code_solution() -> None:
-    dummy_response = claude_response_with_content("""
+@pytest.mark.asyncio
+async def test_response_parsing_for_code_solution() -> None:
+    response_text = """
 lorem
 <thoughts>__thoughts__</thoughts>
 ipsum
@@ -228,19 +224,22 @@ ipsum
 dolor
 <explanation>__explanation__</explanation>
 amet
-""")
-    client = make_test_bedrock_runtime_client([dummy_response])
-    llm = BedrockClaudeLLM(client=client)
-    agent = ScientificPythonAgent(llm, setup_code=SETUP_CODE, setup_output=SETUP_OUTPUT)
-    query = "What is the mean SST value over the entire dataset?"
-    solution = agent.run(query)
-    if not isinstance(client, _MockBedrockRuntimeClient):
-        print(f"Q: {query}")  # noqa: T201
-        print(str(solution))  # noqa: T201
+"""
+    agent = ScientificPythonAgent(
+        TestModel(custom_output_text=response_text),
+        setup_code=SETUP_CODE,
+        setup_output=SETUP_OUTPUT,
+    )
+    solution = await agent.run("What is the mean SST value over the entire dataset?")
+
+    assert solution.thoughts == "__thoughts__"
+    assert solution.code == "__code__"
+    assert solution.explanation == "__explanation__"
 
 
-def test_response_parsing_for_noncode_solution() -> None:
-    dummy_response = claude_response_with_content("""
+@pytest.mark.asyncio
+async def test_response_parsing_for_noncode_solution() -> None:
+    response_text = """
 lorem
 <thoughts>__thoughts__</thoughts>
 ipsum
@@ -248,17 +247,14 @@ ipsum
 dolor
 <explanation>__explanation__</explanation>
 amet
-""")
-    client = make_test_bedrock_runtime_client([dummy_response])
-    llm = BedrockClaudeLLM(model_id=PYTHON_AGENT_DEFAULT_LLM_MODEL_ID, client=client)
-    agent = ScientificPythonAgent(llm, setup_code=SETUP_CODE, setup_output=SETUP_OUTPUT)
-    query = "Which variables are available in the dataset?"
-    solution = agent.run(query)
-    # print out solution if doing a live test
-    if not isinstance(client, _MockBedrockRuntimeClient):
-        print(f"Q: {query}")  # noqa: T201
-        print("---LLMCodeSolution---\n")  # noqa: T201
-        print(f"Thoughts:\n{solution.thoughts}\n")  # noqa: T201
-        print(f"Code:\n{solution.code}\n")  # noqa: T201
-        print(f"Explanation:\n{solution.explanation}\n")  # noqa: T201
-        print("---------------------")  # noqa: T201
+"""
+    agent = ScientificPythonAgent(
+        TestModel(custom_output_text=response_text),
+        setup_code=SETUP_CODE,
+        setup_output=SETUP_OUTPUT,
+    )
+    solution = await agent.run("Which variables are available in the dataset?")
+
+    assert solution.thoughts == "__thoughts__"
+    assert solution.code == ""
+    assert solution.explanation == "__explanation__"

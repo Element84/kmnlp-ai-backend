@@ -1,35 +1,24 @@
-import json
 import logging
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Sequence
 from string import Template
+from typing import Any
 
-from anyio import to_thread
-from e84_geoai_common.llm.core.llm import (
-    Base64ImageContent,
-    CachePointContent,
-    ExecutableLLMTool,
-    LLMAssistantMessage,
-    LLMInferenceConfig,
-    LLMMessage,
-    LLMMessageContentType,
-    LLMToolResultContent,
-    LLMToolUseContent,
-    LLMUserMessage,
-    TextContent,
-)
 from langfuse import observe  # type: ignore[reportUnknownVariableType]
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai import Agent, AgentRunResultEvent, AgentStreamEvent
+from pydantic_ai.models import Model
+from pydantic_ai.models.bedrock import BedrockModelSettings
+from pydantic_ai.usage import UsageLimits
 from rich.pretty import pretty_repr
 
-from llm_agent.context import LLMAgentContext, ToolCallContext
+from llm_agent.context import AgentDeps, ChatContext, ProgressCallback
+from llm_agent.tools.agent_tool import AgentTool
 from llm_agent.tools.fetch_datasets_tool import FetchDatasetsTool
-from llm_agent.utils.prompt_as_service import PromptService
-from llm_agent.utils.utils import EnrichedValidationError, maximum_length_json_string_from_string
+from llm_agent.utils.langfuse import stream_events_to_final_output
 
 log = logging.getLogger(__name__)
 
-MAX_LLM_PROMPT_TURNS = 5
-MAX_ALLOWED_CACHE_POINTS = 2
+DEFAULT_MAX_ALLOWED_TOOL_CALLS_PER_TURN = 8
 
 DEFAULT_MAX_OUTPUT_TOKENS = 10_000
 
@@ -51,6 +40,10 @@ This graph describes:
 * Miscellaneous metadata about the datasets and variables including temporal coverage and units.
 
 Upon receiving a user request, make a tool call to find the relevant information.
+
+IMPORTANT: You are limited to ${max_allowed_tool_calls_per_turn} tool calls per turn. If you \
+exceed this limit, your turn will be aborted and you will not be able to provide a response.
+
 </background>
 
 <format>
@@ -93,60 +86,7 @@ ${example_response}
 """)
 
 
-class MaxPromptTurnsExceededError(Exception):
-    """Max allowed number of tool-use turns exceeded."""
-
-    conversation: list[LLMMessage]
-
-    def __init__(self, conversation: list[LLMMessage]) -> None:
-        """Constructor.
-
-        Args:
-            conversation (list[LLMMessage]):
-                The conversation with too many prompt turns.
-
-        Returns:
-            None
-        """
-        self.conversation = conversation
-
-
-class UnexpectedResponseTypeError(Exception):
-    """Received unexpected response type from LLM."""
-
-    content: Base64ImageContent | LLMToolResultContent | CachePointContent
-
-    def __init__(
-        self,
-        content: Base64ImageContent | LLMToolResultContent | CachePointContent,
-    ) -> None:
-        """Constructor.
-
-        Args:
-            content (Base64ImageContent | LLMToolResultContent | CachePointContent):
-                The content that is of an unexpected type.
-
-        Returns:
-            None
-        """
-        self.content = content
-
-
-class UnableToExtractJSONFromStringError(ValueError):
-    """LLM returned a string that did not seem to contain a JSON object."""
-
-    string: str
-
-    def __init__(self, string: str) -> None:
-        """Constructor.
-
-        Args:
-            string (str): The string returned from the LLM.
-        """
-        self.string = string
-
-
-class DatasetResponseTextContent(BaseModel):
+class DatasetSearchResponse(BaseModel):
     """Data search response format."""
 
     model_config = ConfigDict(frozen=True)
@@ -160,26 +100,16 @@ class DatasetResponseTextContent(BaseModel):
             "quotes inside it; use single quotes instead."
         )
     )
-
     result: list[str] | None = Field(
         default=None,
         description="IDs of all relevant datasets to include in the returned search results.",
     )
-
     is_refusal: bool = Field(
-        description=("Whether the response indicates that your are unable to answer a prompt.")
+        description="Whether the response indicates that you are unable to answer a prompt."
     )
 
 
-class DatasetPickingAgentMessage(BaseModel):
-    """Wrapper for contents in a single message."""
-
-    parsed_content: list[DatasetResponseTextContent | LLMToolUseContent] = Field(
-        description=("Parsed content types present in an LLM assistant response.")
-    )
-
-
-EXAMPLE_RESPONSE = DatasetResponseTextContent(
+EXAMPLE_RESPONSE = DatasetSearchResponse(
     explanation="""\
 Search constraints that can be inferred from the query are:
 - Must have sea surface temperature
@@ -200,269 +130,106 @@ Specifically, this dataset includes a variable:
 - Field name: analysed_sst
 - Unit: Degrees Celsius
 """,  # noqa: E501
-    result=["crw_daily_5km"],
+    result=["crw_5km_sst_daily"],
     is_refusal=False,
 )
 
 
-# NOTE: We have decided to defer unifying the implementations of running
-# queries and handling tool call between the `OrchestrationAgent` and the
-# `DatasetPickingAgent`. However, the logic is highly similar and should be
-# consolidated in something like a `ToolUsingAgent` the next time we write
-# similar functionality.
-class DatasetPickingAgent:
-    """Identifies relevant datasets to answer queries."""
+class DatasetSearchQuery(BaseModel):
+    """Input schema for the dataset picking agent."""
 
-    prompt_service: PromptService
-    tools: list[ExecutableLLMTool[ToolCallContext]]
-    inference_cfg: LLMInferenceConfig
+    query: str = Field(
+        description="The user's natural language search query for relevant datasets."
+    )
+
+
+class DatasetPickingAgent:
+    """Identifies relevant datasets to answer queries.
+
+    Wraps a Pydantic AI agent whose single structured output is a
+    ``DatasetSearchResponse``. The agent makes one or more ``FetchDatasetsTool``
+    calls and ends its turn by producing that structured output.
+    """
 
     def __init__(
         self,
-        prompt_service: PromptService,
-        tools: list[ExecutableLLMTool[ToolCallContext]] | None = None,
+        model: Model,
         *,
-        inference_cfg: LLMInferenceConfig | None = None,
+        tools: Sequence[AgentTool[Any, Any]] | None = None,
+        max_allowed_tool_calls_per_turn: int = DEFAULT_MAX_ALLOWED_TOOL_CALLS_PER_TURN,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        temperature: float = 0,
     ) -> None:
         """Constructor.
 
         Args:
-            prompt_service (PromptService):
-                Prompt service to use when invoking the model.
-
-            tools (list[LLMTool]):
-                The tools to make available to the agent. If None, will use
-                the default set, which includes:
-                    - fetch_datasets_tool
-
-            inference_cfg: LLMInferenceConfig | None:
-                The inference_cfg to use when prompting the LLM. If None, a
-                default config will be provided.
+            model: The Pydantic AI model to drive the agent. Build one with
+                ``llm_agent.model_factory.make_bedrock_model``.
+            tools: The tools to expose to the agent. If None, defaults to a
+                single ``FetchDatasetsTool``.
+            max_allowed_tool_calls_per_turn: Maximum allowed tool calls per turn.
+                Defaults to 8.
+            max_output_tokens: Maximum number of output tokens.
+            temperature: Sampling temperature for the model.
         """
-        self.prompt_service = prompt_service
-        self.tools = tools or [FetchDatasetsTool()]
-        self.tool_name_to_tool = {t.tool_spec.name: t for t in self.tools}
-
-        if inference_cfg is not None and inference_cfg.system_prompt is not None:
-            message = "system_prompt should not be set in the provided LLMInferenceConfig"
-            raise ValueError(message)
-
-        default_inference_cfg = LLMInferenceConfig(
-            temperature=0,
-            response_prefix="{",
-            tools=[tool.tool_spec for tool in self.tools],
-            max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-            system_prompt=DATASET_PICKING_AGENT_SYSTEM_PROMPT.substitute(
-                response_format=pretty_repr(
-                    DatasetResponseTextContent.model_json_schema(),
-                    indent_size=2,
-                ),
-                example_response=EXAMPLE_RESPONSE.model_dump(mode="json"),
+        self._tools = list(tools) if tools is not None else [FetchDatasetsTool()]
+        self._usage_limits = UsageLimits(tool_calls_limit=max_allowed_tool_calls_per_turn)
+        self._agent = Agent(
+            model,
+            deps_type=AgentDeps,
+            output_type=DatasetSearchResponse,
+            instructions=_build_system_prompt(
+                max_allowed_tool_calls_per_turn=max_allowed_tool_calls_per_turn
             ),
+            model_settings=BedrockModelSettings(
+                temperature=temperature,
+                max_tokens=max_output_tokens,
+                bedrock_cache_instructions=True,
+                bedrock_cache_tool_definitions=True,
+            ),
+            tools=[tool.as_pydantic_tool() for tool in self._tools],
         )
 
-        if inference_cfg is None:
-            self.inference_cfg = default_inference_cfg
-        else:
-            self.inference_cfg = default_inference_cfg.model_copy(
-                update=inference_cfg.model_dump(
-                    exclude={"system_prompt"},
-                    exclude_unset=True,
-                    exclude_none=True,
-                )
-            )
-
-    @observe(as_type="agent", name="DatasetPickingAgent.run")
+    @observe(as_type="agent", name=__name__)
     async def run(
-        self, context: LLMAgentContext, query: str
-    ) -> AsyncGenerator[DatasetPickingAgentMessage]:
-        """Prompt the agent with a natural language query for relevant data.
-
-        If the LLM's response does not contain any tool-use requests, the
-        returned iterator will only yield a single message.
-
-        If the response does contain tool-use requests, the returned iterator
-        will yield all responses from the LLM as they become available. This
-        includes intermediate messages, tool use requests, and final messages.
-
-        There may be several rounds of these if the LLM issues new tool-use
-        requests in response to results of previous tool-use requests.
-        """
-        # Keep track of conversation messages throughout this method.
-        # The user's query is the first message in the conversation.
-        convo_messages: list[LLMMessage] = [
-            LLMUserMessage(
-                content=[
-                    TextContent(text=query),
-                    CachePointContent(),
-                ]
-            )
-        ]
-
-        cache_point_counter = 1
-        for _ in range(MAX_LLM_PROMPT_TURNS):
-            # Get response to user's query, yield it, and track it to include
-            # in future context
-            assistant_message = await self.run_single(convo_messages)
-
-            yield assistant_message
-
-            convo_messages.append(_assistant_message_to_llm_message(assistant_message))
-
-            # Extract tool use requests
-            tool_use_requests = [
-                c for c in assistant_message.parsed_content if isinstance(c, LLMToolUseContent)
-            ]
-
-            # If there are no tool use requests, stop executing!
-            if not tool_use_requests:
-                break
-
-            log.info("Using tools: %s", pretty_repr(tool_use_requests))
-
-            # Execute tools and gather results
-            tool_results = [
-                tool_result async for tool_result in self._use_tools(context, tool_use_requests)
-            ]
-
-            # Naively insert a cache point after every tool result until limit is reached.
-            if cache_point_counter < MAX_ALLOWED_CACHE_POINTS:
-                content = [*tool_results, CachePointContent()]
-                cache_point_counter += 1
-            else:
-                content = tool_results
-            # Add all tool results as messages to the conversation,
-            # then let the loop run again.
-            tool_results_message = LLMUserMessage(content=content)
-            convo_messages.append(tool_results_message)
-        else:
-            raise MaxPromptTurnsExceededError(conversation=convo_messages)
-
-    @observe(name="DatasetPickingAgent.run_single")
-    async def run_single(self, convo_messages: list[LLMMessage]) -> DatasetPickingAgentMessage:
-        """Run a single prompt and return the parsed contents.
-
-        Args:
-            convo_messages (list[LLMMessage]):
-                All of the messages in the conversation so far. It is expected
-                that the roles of the conversation messages will alternate
-                between "user" and "assistant" and represent a
-                question/response flow.
-
-                In some cases, a single `LLMMessage`'s `content` may contain >
-                1 `LLMMessageContentType`. These case typically occur in
-                messages from the assistant. In the context of this agent, it
-                typically occurs when the assistant replies with some
-                explanation and a tool call.
-
-        Returns:
-            list[DatasetResponseTextContent | LLMToolUseContent]:
-                The parsed `LLMMessageContentType` elements.
-        """
-        log.debug("Request convo messages: %s", pretty_repr(convo_messages))
-        response_message = await self.prompt_service((convo_messages, self.inference_cfg))
-        log.info("Response from agent: %s", pretty_repr(response_message))
-        content = response_message.content
-
-        # If content is plain string, try to parse it as a response.
-        if isinstance(content, str):
-            log.warning(
-                "Received an assistant message with plain string content: %s",
-                content,
-            )
-
-            # NOTE: It is important to `json.loads` our string rather than and
-            # now passing it directly to `.model_validate_json`. There is no
-            # way to get Pydantic  to allow control characters (e.g. newline
-            # literals) inside of string values, and the LLM loves to spit
-            # those out.
-            return DatasetPickingAgentMessage(
-                parsed_content=[_parse_response_text_content(content)]
-            )
-
-        # Content is now assured to be a Sequence[LLMMessageContentType]
-        return DatasetPickingAgentMessage(parsed_content=[_parse_content(c) for c in content])
-
-    async def _use_tools(
-        self, context: LLMAgentContext, tool_use_requests: Iterable[LLMToolUseContent]
-    ) -> AsyncGenerator[LLMToolResultContent]:
-        """Execute tools and yield results as they become available."""
-        for tool_use_request in tool_use_requests:
-            tool = self.tool_name_to_tool[tool_use_request.name]
-            tool_call_context = ToolCallContext(
-                tool_call_id=tool_use_request.id,
-                global_context=context,
-                progress_callback=None,
-            )
-            tool_result = await to_thread.run_sync(
-                tool.execute, tool_call_context, tool_use_request
-            )
-
-            log.info("Tool result: %s", pretty_repr(tool_result))
-
-            yield tool_result
-
-    @property
-    def prompt_template(self) -> str:
-        """The prompt template used by the agent."""
-        return ""
-
-
-###########
-# Helpers #
-###########
-
-
-def _parse_content(
-    content: LLMMessageContentType,
-) -> DatasetResponseTextContent | LLMToolUseContent:
-    match content:
-        case TextContent():
-            # NOTE: It is important to `json.loads` our string rather than
-            # and now passing it directly to `.model_validate_json`. There
-            # is no way to get Pydantic  to allow control characters (e.g.
-            # newline literals) inside of string values, and the LLM loves
-            # to spit those out.
-            return _parse_response_text_content(content.text)
-
-        case LLMToolUseContent():
-            return content
-
-        case Base64ImageContent() | LLMToolResultContent() | CachePointContent():
-            log.warning("Unexpected response content type: %s", content)
-            raise UnexpectedResponseTypeError(content)
-
-
-def _parse_response_text_content(value: str) -> DatasetResponseTextContent:
-    try:
-        json_string = maximum_length_json_string_from_string(value)
-    except ValueError as e:
-        log.exception("Failed to extract JSON string from LLM response: %s", value)
-        raise UnableToExtractJSONFromStringError(value) from e
-
-    try:
-        return DatasetResponseTextContent.model_validate(
-            json.loads(json_string, strict=False), strict=False
+        self,
+        chat_context: ChatContext,
+        query: DatasetSearchQuery,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> DatasetSearchResponse:
+        """Run the agent and return the final structured response."""
+        deps = AgentDeps(chat_context=chat_context, progress_callback=progress_callback)
+        result = await self._agent.run(
+            _format_query(query), deps=deps, usage_limits=self._usage_limits
         )
-    except ValidationError as e:
-        raise EnrichedValidationError(e, data=value) from None
+        log.info("DatasetPickingAgent response: %s", pretty_repr(result.output))
+        return result.output
 
-    except json.JSONDecodeError:
-        log.exception("Failed to decode message: %s", value)
-        raise
+    @observe(as_type="agent", name=__name__, transform_to_string=stream_events_to_final_output)
+    async def run_stream(
+        self,
+        chat_context: ChatContext,
+        query: DatasetSearchQuery,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent | AgentRunResultEvent[DatasetSearchResponse]]:
+        """Run the agent, streaming each event (tool calls/results, final output) in realtime."""
+        deps = AgentDeps(chat_context=chat_context, progress_callback=progress_callback)
+        async with self._agent.run_stream_events(
+            _format_query(query), deps=deps, usage_limits=self._usage_limits
+        ) as stream:
+            async for event in stream:
+                yield event
 
 
-def _assistant_message_to_llm_message(
-    response: DatasetPickingAgentMessage,
-) -> LLMAssistantMessage:
-    return LLMAssistantMessage(content=[_serialize_content(c) for c in response.parsed_content])
+def _format_query(query: DatasetSearchQuery) -> str:
+    return query.query
 
 
-def _serialize_content(
-    parsed_content: DatasetResponseTextContent | LLMToolUseContent,
-) -> LLMMessageContentType:
-    match parsed_content:
-        case DatasetResponseTextContent():
-            return TextContent(text=parsed_content.model_dump_json())
-        case LLMToolUseContent():
-            return parsed_content
+def _build_system_prompt(max_allowed_tool_calls_per_turn: int) -> str:
+    return DATASET_PICKING_AGENT_SYSTEM_PROMPT.substitute(
+        max_allowed_tool_calls_per_turn=max_allowed_tool_calls_per_turn,
+        response_format=pretty_repr(DatasetSearchResponse.model_json_schema(), indent_size=2),
+        example_response=pretty_repr(EXAMPLE_RESPONSE.model_dump_json()),
+    )

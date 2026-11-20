@@ -4,33 +4,23 @@
 import logging
 import statistics
 from dataclasses import dataclass
-from json import JSONDecodeError
 from typing import Any, cast
 from unittest.mock import Mock
 
-import boto3
-from e84_geoai_common.llm.core import (
-    ExecutableLLMTool,
-    LLMInferenceConfig,
-    LLMMessage,
-    LLMToolUseContent,
-)
-from e84_geoai_common.llm.models import (
-    CLAUDE_BEDROCK_MODEL_IDS,
-    BedrockClaudeLLM,
-)
+from chromadb import EphemeralClient
 from natural_language_geocoding.tests.canned_place_lookup import CannedPlaceLookup
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel
+from pydantic_ai import AgentRunResultEvent, UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.messages import FunctionToolCallEvent
 from tqdm import tqdm
 
 from llm_agent.agents.dataset_picking_agent.dataset_picking_agent import (
     DatasetPickingAgent,
-    DatasetPickingAgentMessage,
-    DatasetResponseTextContent,
-    MaxPromptTurnsExceededError,
-    UnexpectedResponseTypeError,
+    DatasetSearchQuery,
+    DatasetSearchResponse,
 )
-from llm_agent.context import LLMAgentContext, ToolCallContext
+from llm_agent.context import LLMAgentContext
+from llm_agent.dao.chromadb_embedding_dao import ChromaDBEmbeddingDAO
 from llm_agent.dao.knowledge_graph_dao import KnowledgeGraphDAO
 from llm_agent.evaluation.base_eval import (
     BaseEvaluator,
@@ -40,13 +30,18 @@ from llm_agent.evaluation.base_eval import (
     ExperimentConfig,
     SingleEvalResult,
 )
-from llm_agent.evaluation.utils import SummaryStats
+from llm_agent.evaluation.utils import MockChatContext, SummaryStats, build_eval_client
+from llm_agent.model_factory import make_bedrock_model
+from llm_agent.repository.embedding_index_repository import EmbeddingIndexRepository
+from llm_agent.tools.agent_tool import AgentTool
 from llm_agent.tools.execute_sparql_query_tool import ExecuteSparqlQueryTool
 from llm_agent.tools.fetch_datasets_tool import FetchDatasetsTool
-from llm_agent.utils.prompt_as_service import PromptServiceAdapter
-from llm_agent.utils.utils import EnrichedValidationError
 
 log = logging.getLogger(__name__)
+
+# Name Pydantic AI assigns to the structured-output tool; excluded from the
+# recorded "real" tool calls (e.g. dataset fetches).
+_OUTPUT_TOOL_NAME = "final_result"
 
 
 @dataclass
@@ -68,9 +63,7 @@ class DatasetPickingResponseAttrs(BaseModel):
 
     is_refusal: bool
     tool_call_count: int
-    explanatory_content_count: int
     dataset_ids: list[str]
-    has_datasets_in_multiple_responses: bool
 
 
 class _DatasetPickingExperimentConfig(BaseModel):
@@ -180,14 +173,26 @@ class DatasetPickingAgentFailure(BaseModel):
     failed_output: dict[str, Any] | str
 
 
+class DatasetPickingToolCall(BaseModel):
+    """A tool call made by the agent during a run."""
+
+    name: str
+    args: dict[str, Any]
+
+
+class DatasetPickingAgentFullResponse(BaseModel):
+    """Full agent response from a single turn."""
+
+    tool_calls: list[DatasetPickingToolCall]
+    final_response: DatasetSearchResponse | None
+
+
 class DatasetPickingAgentSingleEvalResult(BaseModel):
     """Results for a single eval test case."""
 
     input: DatasetPickingEvalInput
-    output: list[DatasetPickingAgentMessage] | DatasetPickingAgentFailure
+    output: DatasetPickingAgentFullResponse | DatasetPickingAgentFailure
     metrics: DatasetPickingSingleEvalMetrics
-
-    _type_adapter = TypeAdapter(list[DatasetPickingAgentMessage])
 
     @staticmethod
     def from_single_eval_result(
@@ -204,16 +209,9 @@ class DatasetPickingAgentSingleEvalResult(BaseModel):
 
     def to_single_eval_result(self) -> SingleEvalResult:
         """Convert back to `SingleEvalResult`."""
-        output: dict[str, Any] | list[dict[str, Any]] | None = None
-        match self.output:
-            case list():
-                output = self._type_adapter.dump_python(self.output)
-            case DatasetPickingAgentFailure():
-                output = self.output.model_dump()
-
         return SingleEvalResult(
             input=self.input.to_eval_input(),
-            output=output,
+            output=self.output.model_dump(),
             metrics=self.metrics.model_dump(),
         )
 
@@ -296,12 +294,17 @@ class DatasetPickingMultiRunEvalReport(BaseModel):
 
 
 # The context doesn't matter for LLM evaluation so we use this one as with unit tests.
-s3_client = boto3.client("s3")  # type: ignore[reportUnknownMemberType]
-context = LLMAgentContext(
-    place_lookup=CannedPlaceLookup(),
-    s3_client=s3_client,
-    knowledge_graph_dao=KnowledgeGraphDAO(),
-    dask_client=Mock(),
+context = MockChatContext(
+    LLMAgentContext(
+        place_lookup=CannedPlaceLookup(),
+        knowledge_graph_dao=KnowledgeGraphDAO(),
+        embedding_repo=EmbeddingIndexRepository(
+            ChromaDBEmbeddingDAO(EphemeralClient(), "datasets"),
+            KnowledgeGraphDAO().fetch_datasets(),
+        ),
+        dask_client=Mock(),
+        bedrock_client=Mock(),
+    )
 )
 
 
@@ -330,12 +333,9 @@ class DatasetPickingAgentEvaluator(BaseEvaluator):
         experiment_config: _DatasetPickingExperimentConfig,
         dataset: list[DatasetPickingEvalInput],
     ) -> DatasetPickingEvalReport:
-        llm = BedrockClaudeLLM(model_id=CLAUDE_BEDROCK_MODEL_IDS[experiment_config.model_name])
-        inference_cfg = LLMInferenceConfig(temperature=experiment_config.temperature)
+        model = make_bedrock_model(build_eval_client(), model_id=experiment_config.model_name)
         tools = _tools_for_tool_names(experiment_config.available_tool_names)
-        agent = DatasetPickingAgent(
-            PromptServiceAdapter(llm.prompt), inference_cfg=inference_cfg, tools=tools
-        )
+        agent = DatasetPickingAgent(model, tools=tools, temperature=experiment_config.temperature)
         with tqdm(dataset, desc="Evaluating") as bar:
             results = [await self._eval_single_case(agent, case) for case in bar]
         return DatasetPickingEvalReport(
@@ -349,73 +349,32 @@ class DatasetPickingAgentEvaluator(BaseEvaluator):
     ) -> DatasetPickingAgentSingleEvalResult:
         log.debug("Starting case with id: %s", case.id)
         try:
-            messages = [
-                message async for message in agent.run(context, case.natural_language_query)
-            ]
-        except JSONDecodeError as e:
-            message = "Unable to parse JSON: %s"
-            log.exception(message, e.doc)
-            return DatasetPickingAgentSingleEvalResult(
-                input=case,
-                output=DatasetPickingAgentFailure(
-                    name=type(e).__name__, message=message, failed_output=e.doc
-                ),
-                metrics=DatasetPickingSingleEvalMetrics(
-                    format_compliant=False, schema_compliant=False
-                ),
+            tool_calls: list[DatasetPickingToolCall] = []
+            final_response: DatasetSearchResponse | None = None
+            async for event in agent.run_stream(
+                context, DatasetSearchQuery(query=case.natural_language_query)
+            ):
+                if (
+                    isinstance(event, FunctionToolCallEvent)
+                    and event.part.tool_name != _OUTPUT_TOOL_NAME
+                ):
+                    tool_calls.append(
+                        DatasetPickingToolCall(
+                            name=event.part.tool_name, args=event.part.args_as_dict()
+                        )
+                    )
+                elif isinstance(event, AgentRunResultEvent):
+                    final_response = event.result.output
+            response = DatasetPickingAgentFullResponse(
+                tool_calls=tool_calls, final_response=final_response
             )
-        except EnrichedValidationError as e:
-            message = "JSON parseable but did not fit model schema."
+        except UsageLimitExceeded as e:
+            message = "Tool-call usage limit exceeded."
             log.exception(message)
             return DatasetPickingAgentSingleEvalResult(
                 input=case,
                 output=DatasetPickingAgentFailure(
-                    name=type(e).__name__,
-                    message=message,
-                    failed_output=e.data,
-                ),
-                metrics=DatasetPickingSingleEvalMetrics(
-                    format_compliant=True, schema_compliant=False
-                ),
-            )
-        except UnexpectedResponseTypeError as e:
-            message = f"Got a response with an unexpected content type: {type(e.content)}"
-            log.exception(message)
-            return DatasetPickingAgentSingleEvalResult(
-                input=case,
-                output=DatasetPickingAgentFailure(
-                    name=type(e).__name__,
-                    message=message,
-                    failed_output=(e.content).model_dump(mode="json"),
-                ),
-                metrics=DatasetPickingSingleEvalMetrics(
-                    format_compliant=False, schema_compliant=False
-                ),
-            )
-        except MaxPromptTurnsExceededError as e:
-            message = "Max tool use turns exceeded."
-            log.exception(message)
-
-            # Turn the conversation list of messages into a Python dict.
-            #
-            # In the event that serialization fails, handle by writing an empty
-            # conversation to the results file so that execution continues and
-            # aggregate metrics are accurate.
-            try:
-                type_adapter = TypeAdapter(list[LLMMessage])
-                messages_in_conversation: list[dict[str, Any]] = type_adapter.dump_python(
-                    e.conversation
-                )
-                conversation = {"conversation": messages_in_conversation}
-            except Exception:  # noqa: BLE001
-                conversation: dict[str, Any] = {}
-
-            return DatasetPickingAgentSingleEvalResult(
-                input=case,
-                output=DatasetPickingAgentFailure(
-                    name=type(e).__name__,
-                    message=message,
-                    failed_output=conversation,
+                    name=type(e).__name__, message=message, failed_output=str(e)
                 ),
                 metrics=DatasetPickingSingleEvalMetrics(
                     format_compliant=True,
@@ -423,8 +382,20 @@ class DatasetPickingAgentEvaluator(BaseEvaluator):
                     is_too_many_prompt_turns=True,
                 ),
             )
+        except UnexpectedModelBehavior as e:
+            message = "Agent failed to produce a valid structured response."
+            log.exception(message)
+            return DatasetPickingAgentSingleEvalResult(
+                input=case,
+                output=DatasetPickingAgentFailure(
+                    name=type(e).__name__, message=message, failed_output=str(e)
+                ),
+                metrics=DatasetPickingSingleEvalMetrics(
+                    format_compliant=True, schema_compliant=False
+                ),
+            )
 
-        response_attrs = _response_attrs_for(messages)
+        response_attrs = _response_attrs_for(response)
 
         metrics = DatasetPickingSingleEvalMetrics(
             format_compliant=True,
@@ -444,7 +415,7 @@ class DatasetPickingAgentEvaluator(BaseEvaluator):
             ),
         )
 
-        return DatasetPickingAgentSingleEvalResult(input=case, output=messages, metrics=metrics)
+        return DatasetPickingAgentSingleEvalResult(input=case, output=response, metrics=metrics)
 
     async def _aggregate_eval_reports(self, reports: list[EvalReport]) -> EvalReport:
         reports_custom = [DatasetPickingEvalReport.from_eval_report(r) for r in reports]
@@ -513,95 +484,18 @@ def _aggregate_metrics(
     )
 
 
-def _datasets_ids_in_last_message(
-    messages: list[DatasetPickingAgentMessage],
-) -> list[str]:
-    # Return empty list if messages is empty.
-    # Most useful for when expected output is empty during testing.
-    if len(messages) == 0:
-        return []
-
-    last_message = messages[-1]
-    return [
-        dataset_i
-        for content in last_message.parsed_content
-        if isinstance(content, DatasetResponseTextContent)
-        if content.result
-        for dataset_i in content.result
-    ]
-
-
-def _tool_call_count(messages: list[DatasetPickingAgentMessage]) -> int:
-    return len(
-        [
-            True
-            for message in messages
-            for content in message.parsed_content
-            if isinstance(content, LLMToolUseContent)
-        ]
-    )
-
-
-def _has_datasets_in_multiple_messages(
-    messages: list[DatasetPickingAgentMessage],
-) -> bool:
-    return (
-        len(
-            [
-                True
-                for message in messages
-                for parsed_content in message
-                if isinstance(parsed_content, DatasetResponseTextContent)
-                if parsed_content.result
-            ]
+def _response_attrs_for(response: DatasetPickingAgentFullResponse) -> DatasetPickingResponseAttrs:
+    if response.final_response is None:
+        return DatasetPickingResponseAttrs(
+            is_refusal=False,
+            tool_call_count=len(response.tool_calls),
+            dataset_ids=[],
         )
-        > 1
-    )
-
-
-def _response_attrs_for(
-    messages: list[DatasetPickingAgentMessage],
-) -> DatasetPickingResponseAttrs:
-    dataset_ids_in_last_message = _datasets_ids_in_last_message(messages)
 
     return DatasetPickingResponseAttrs(
-        is_refusal=_is_refusal(messages),
-        tool_call_count=_tool_call_count(messages),
-        explanatory_content_count=_explanatory_content_count(messages),
-        dataset_ids=dataset_ids_in_last_message,
-        has_datasets_in_multiple_responses=_has_datasets_in_multiple_messages(messages),
-    )
-
-
-def _is_refusal(messages: list[DatasetPickingAgentMessage]) -> bool:
-    # Cannot be a refusal if there are no messages.
-    #
-    # This is mostly useful for running with empty expected output to see
-    # results.
-    if len(messages) == 0:
-        return False
-
-    last_message = messages[-1]
-    last_content = last_message.parsed_content[-1]
-
-    match last_content:
-        case DatasetResponseTextContent():
-            return last_content.is_refusal
-        case LLMToolUseContent():
-            return False
-
-
-def _explanatory_content_count(
-    messages: list[DatasetPickingAgentMessage],
-) -> int:
-    return len(
-        [
-            True
-            for message in messages
-            for content in message.parsed_content
-            if isinstance(content, DatasetResponseTextContent)
-            if content.result is None
-        ]
+        is_refusal=response.final_response.is_refusal,
+        tool_call_count=len(response.tool_calls),
+        dataset_ids=response.final_response.result or [],
     )
 
 
@@ -620,39 +514,27 @@ def _intermediate_metric_from_result(
     )
 
 
-def _is_correct_refusal(
-    result: DatasetPickingAgentSingleEvalResult,
-) -> bool | None:
+def _is_correct_refusal(result: DatasetPickingAgentSingleEvalResult) -> bool | None:
     if result.metrics.is_refusal:
         return result.input.expected_response_attrs.is_refusal
-
     return None
 
 
-def _is_incorrect_refusal(
-    result: DatasetPickingAgentSingleEvalResult,
-) -> bool | None:
+def _is_incorrect_refusal(result: DatasetPickingAgentSingleEvalResult) -> bool | None:
     if result.metrics.is_refusal:
         return not result.input.expected_response_attrs.is_refusal
-
     return None
 
 
-def _is_correct_non_refusal(
-    result: DatasetPickingAgentSingleEvalResult,
-) -> bool | None:
+def _is_correct_non_refusal(result: DatasetPickingAgentSingleEvalResult) -> bool | None:
     if not result.metrics.is_refusal:
         return not result.input.expected_response_attrs.is_refusal
-
     return None
 
 
-def _is_incorrect_non_refusal(
-    result: DatasetPickingAgentSingleEvalResult,
-) -> bool | None:
+def _is_incorrect_non_refusal(result: DatasetPickingAgentSingleEvalResult) -> bool | None:
     if not result.metrics.is_refusal:
         return result.input.expected_response_attrs.is_refusal
-
     return None
 
 
@@ -676,8 +558,8 @@ def _recall[T](actual: list[T], expected: list[T]) -> float | None:
     return true_positives / (true_positives + false_negatives)
 
 
-def _tools_for_tool_names(tool_names: list[str]) -> list[ExecutableLLMTool[ToolCallContext]]:
-    tool_dict = {
+def _tools_for_tool_names(tool_names: list[str]) -> list[AgentTool[Any, Any]]:
+    tool_dict: dict[str, AgentTool[Any, Any]] = {
         "fetch_datasets_tool": FetchDatasetsTool(),
         "execute_sparql_query_tool": ExecuteSparqlQueryTool(),
     }

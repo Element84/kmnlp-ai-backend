@@ -9,11 +9,12 @@ from llm_agent.agents.algorithm_agent.algorithm.function_sets import (
 )
 from llm_agent.agents.algorithm_agent.algorithm.function_sets.data_array_functions import (
     BinaryOperation,
-    DataArrayToList,
+    CreateGeoTIFF,
     SliceDataArray,
 )
-from llm_agent.agents.algorithm_agent.algorithm.function_sets.general_plot_functions import (
-    PlotBarChart,
+from llm_agent.agents.algorithm_agent.algorithm.function_sets.plot.basic import (
+    BarPlotSpec,
+    MakePlot,
 )
 from llm_agent.agents.algorithm_agent.algorithm.type_check import (
     ArgumentTypeMismatchError,
@@ -59,39 +60,51 @@ class TestErrorMessages:
     """Test that error messages are informative."""
 
     def test_variable_type_mismatch_error_message(self):
+        context = ExecutionContext({})
         var = InferredVariable(type="str", name="my_var")
-        func = DataArrayToList(
-            func_name="DataArrayToList",
+        func = CreateGeoTIFF(
+            func_name="CreateGeoTIFF",
             data_array=VariableReference(name="my_var"),
         )
 
-        error = VariableTypeMismatchError(var, "DataArray", func)
-        assert "DataArrayToList" in str(error)
+        error = VariableTypeMismatchError(
+            var=var, expected_type="DataArray", func=func, context=context
+        )
+        assert "CreateGeoTIFF" in str(error)
         assert "my_var" in str(error)
         assert "DataArray" in str(error)
 
     def test_argument_type_mismatch_error_message(self):
-        func = PlotBarChart(
-            func_name="PlotBarChart",
-            labels=["A"],
-            heights=[VariableReference(name="bad_height")],
-            title="Test",
+        context = ExecutionContext({})
+        func = MakePlot(
+            func_name="MakePlot",
+            plot_spec=BarPlotSpec(
+                labels=["A"],
+                heights=[VariableReference(name="bad_height")],
+            ),
         )
 
-        error = ArgumentTypeMismatchError(func, "heights[0]", "int | float", "str")
-        assert "PlotBarChart" in str(error)
+        error = ArgumentTypeMismatchError(
+            func=func,
+            arg_name="heights[0]",
+            expected_type="int | float",
+            actual_type="str",
+            context=context,
+        )
+        assert "MakePlot" in str(error)
         assert "heights[0]" in str(error)
         assert "int | float" in str(error)
         assert "str" in str(error)
 
     def test_invalid_dim_name_error_message(self):
+        context = ExecutionContext({})
         func = SliceDataArray(
             func_name="SliceDataArray",
             data_array=VariableReference(name="data"),
             dim_slices={"bad_dim": (0, 10)},
         )
 
-        error = InvalidDimNameError("bad_dim", func)
+        error = InvalidDimNameError(dim_name="bad_dim", func=func, context=context)
         assert "SliceDataArray" in str(error)
         assert "bad_dim" in str(error)
 
@@ -107,7 +120,8 @@ class TestErrorMessages:
             shape={"lat": 20, "lon": 30},
         )
 
-        error = BinaryOpDataArrayMisMatchError("add", left, right)
+        context = ExecutionContext({})
+        error = BinaryOpDataArrayMisMatchError(op="add", left=left, right=right, context=context)
         assert "add" in str(error)
         assert "Incompatible DataArrays" in str(error)
 

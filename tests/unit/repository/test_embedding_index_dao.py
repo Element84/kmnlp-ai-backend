@@ -16,7 +16,7 @@ from llm_agent.dao.models.embeddings_index_models import (
 if TYPE_CHECKING:
     from llm_agent.model.dataset import Dataset
 
-from llm_agent.repository.embedding_index_dao import (
+from llm_agent.repository.embedding_index_repository import (
     EmbeddingIndexRepository,
 )
 
@@ -40,11 +40,11 @@ class TestEmbeddingIndexRepository:
                 comment="comment 2",
             ),
         ]
-        repository = EmbeddingIndexRepository(dao)
+        repository = EmbeddingIndexRepository(dao, [])
 
         repository.add_datasets(datasets)
 
-        dao.add_documents.assert_called_once_with(
+        dao.add_documents.assert_called_with(
             [
                 DocumentWrapper(
                     id="http://kmnlp.noaa.gov/1-description",
@@ -113,7 +113,7 @@ class TestEmbeddingIndexRepository:
         )
         dao.query.return_value = document_search_results
 
-        repository = EmbeddingIndexRepository(dao)
+        repository = EmbeddingIndexRepository(dao, [])
         result = repository.query("sea surface temperature")
 
         # Assert result

@@ -1,3 +1,5 @@
+import logging
+
 import chromadb
 from chromadb.api import ClientAPI
 
@@ -9,6 +11,8 @@ from llm_agent.dao.embedding_dao import (
 from llm_agent.transformers.transformers import (
     chromadb_query_result_to_document_search_results,
 )
+
+log = logging.getLogger(__name__)
 
 
 class ChromaDBEmbeddingDAO(EmbeddingDAO):
@@ -27,7 +31,13 @@ class ChromaDBEmbeddingDAO(EmbeddingDAO):
         self.collection_name = collection_name
 
         self._client = client
-        self._collection = client.create_collection("datasets")
+        try:
+            client.delete_collection(collection_name)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Didn't delete previously-existing collection presumably because it didn't exist"
+            )
+        self._collection = client.create_collection(collection_name)
 
     def add_documents(self, documents: list[DocumentWrapper]) -> None:
         """Add the provided documents to the collection."""

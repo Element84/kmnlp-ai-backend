@@ -1,59 +1,61 @@
 import logging
-from unittest.mock import Mock
+import os
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pytest
+import rioxarray
 import xarray as xr
-from botocore.exceptions import ClientError
 
 from llm_agent.transformers.geotiff_transformers import (
     InvalidShapeForGeoTIFFError,
     _preprocess_data_array,  # pyright: ignore[reportPrivateUsage]
+    _save_data_array_as_geotiff,  # pyright: ignore[reportPrivateUsage]
     data_array_to_geotiff_ref,
 )
-from llm_agent.uploaders.s3_file_uploader import UploadError
+from tests.utils.fixtures.context import MockChatContext
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
 
-def test_data_array_to_geotiff_ref(lat_lon_data_array: xr.DataArray):
-    # Mock S3Client with success result
-    s3_client = Mock()
-    s3_client.upload_file.return_value = None
+@pytest.mark.asyncio
+def test_save_data_array_as_geotiff(lat_lon_data_array: xr.DataArray):
+    with NamedTemporaryFile(prefix="geotiff_", suffix=".tif") as tmpfile:
+        _save_data_array_as_geotiff(lat_lon_data_array, tmpfile.name)
+        assert os.path.exists(tmpfile.name)
+        assert tmpfile.name.endswith(".tif")
 
+        # Read back with rioxarray, reproject to match the original grid, then compare
+        data_back = rioxarray.open_rasterio(tmpfile.name).squeeze("band", drop=True)  # pyright: ignore[reportUnknownVariableType, reportAttributeAccessIssue, reportUnknownMemberType]
+        data_back_matched = data_back.rio.reproject_match(lat_lon_data_array)  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+        np.testing.assert_allclose(  # pyright: ignore[reportUnknownMemberType]
+            data_back_matched.values,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType, reportUnknownArgumentType]
+            lat_lon_data_array.values.astype(np.float32),
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.asyncio
+async def test_data_array_to_geotiff_ref(
+    lat_lon_data_array: xr.DataArray, chat_context: MockChatContext
+):
     # Create Stub Data Array
     data_array = lat_lon_data_array
 
     # Create GeoTIFF
-    ref = data_array_to_geotiff_ref(data_array, s3_client)
+    ref = await data_array_to_geotiff_ref(data_array, chat_context)
 
     # Assert Ref as expected
-    assert ref.url.startswith("https://test-geotiff-bucket.s3.us-east-1.amazonaws.com/")
-    assert ref.url.endswith(".tif")
-    assert ref.label == "some name"
+    assert ref.name == "some name"
     assert ref.units == "example unit"
     assert ref.min_value == 0.0
     assert ref.max_value == 99.0
 
-    # Assert upload was called
-    s3_client.upload_file.assert_called_once()
-
-
-def test_data_array_to_geotiff_ref_handle_upload_error(lat_lon_data_array: xr.DataArray):
-    # Mock S3Client with success result
-    s3_client = Mock()
-    s3_client.upload_file.side_effect = ClientError({"error": "error"}, "error")  # pyright: ignore[reportArgumentType]
-
-    # Create Stub Data Array
-    data_array = lat_lon_data_array
-
-    # Create GeoTIFF
-    with pytest.raises(UploadError):
-        data_array_to_geotiff_ref(data_array, s3_client)
-
-    # Assert upload was called
-    s3_client.upload_file.assert_called_once()
+    geotiff_path = chat_context.retrieve_data(ref)
+    assert isinstance(geotiff_path, str)
+    assert geotiff_path.endswith(".tif")
 
 
 ####################################

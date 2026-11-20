@@ -18,11 +18,11 @@ class TestMakeFunctionCallModel:
 
     def test_basic(self):
         class Func1(Function, frozen=True):
-            func_name: Literal["Func1"]
+            func_name: Literal["Func1"] = "Func1"
             param: str
 
         class Func2(Function, frozen=True):
-            func_name: Literal["Func2"]
+            func_name: Literal["Func2"] = "Func2"
             param: int
 
         function_call = make_function_call_model([Func1, Func2])

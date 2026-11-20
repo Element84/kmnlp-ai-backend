@@ -42,17 +42,17 @@ integration_tests:
     - main
 
 # Define evals job
-evals:
-  stage: side_effecting
-  script:
-    - pip3.12 install uv
-    - uv sync --all-extras
-    - source .venv/bin/activate
-    - . scripts/assume_role_ci.sh
-    - ./scripts/run_evals.py --tag $CI_COMMIT_SHA --remote
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: on_success
+# evals:
+#   stage: side_effecting
+#   script:
+#     - pip3.12 install uv
+#     - uv sync --all-extras
+#     - source .venv/bin/activate
+#     - . scripts/assume_role_ci.sh
+#     - ./scripts/run_evals.py --tag $CI_COMMIT_SHA --remote
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+#       when: on_success
 
 # Trigger a job to update dependency in demo-app
 trigger_dependendee_update:

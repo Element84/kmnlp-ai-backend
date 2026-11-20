@@ -12,7 +12,7 @@ class TestDataAnalysisToolInput:
             "problem_statement": (
                 "Extract sea surface temperature data for the Gulf of Mexico on June 1, 2023"
             ),
-            "variable_ids": ["sea_surface_temperature_crw_daily_5km"],
+            "input_data": ["sea_surface_temperature_crw_5km_sst_daily"],
             "outputs_requested": [
                 {
                     "name": "average_sst",
@@ -42,7 +42,7 @@ class TestDataAnalysisToolInput:
 
     def test_missing_key_fails_to_parse(self):
         input_dict = {
-            "variable_ids": ["sea_surface_temperature_crw_daily_5km"],
+            "input_data": ["sea_surface_temperature_crw_5km_sst_daily"],
             "outputs_requested": [
                 {
                     "name": "average_sst",
@@ -69,7 +69,7 @@ class TestDataAnalysisToolInput:
     def test_over_escaped_input_succeeds(self):
         input_str = dedent("""{
             "problem_statement": "Extract sea surface temperature data for the Gulf of Mexico on June 1, 2023",
-            "variable_ids": ["sea_surface_temperature_crw_daily_5km"],
+            "input_data": ["sea_surface_temperature_crw_5km_sst_daily"],
             "outputs_requested": [
                 {
                     "name": "average_sst",
@@ -96,7 +96,7 @@ class TestDataAnalysisToolInput:
         # It is unexpected because:
         #   * It was returned as a JSON String rather than JSON Object.
         #   * It has an extra `}`.
-        input_str = """{"problem_statement": "Extract sea surface temperature data for the Gulf of Mexico on June 1, 2023", "variable_ids": ["sea_surface_temperature_crw_daily_5km"], "outputs_requested": [{"name": "average_sst", "variable_type": "scalar_float", "description": "Average sea surface temperature in the Gulf of Mexico on June 1, 2023"}, {"name": "min_sst", "variable_type": "scalar_float", "description": "Minimum sea surface temperature in the Gulf of Mexico on June 1, 2023"}, {"name": "max_sst", "variable_type": "scalar_float", "description": "Maximum sea surface temperature in the Gulf of Mexico on June 1, 2023"}, {"name": "sst_map", "variable_type": "raster_plot", "description": "Spatial map of sea surface temperature in the Gulf of Mexico on June 1, 2023"}]}}"""  # noqa: E501
+        input_str = """{"problem_statement": "Extract sea surface temperature data for the Gulf of Mexico on June 1, 2023", "input_data": ["sea_surface_temperature_crw_5km_sst_daily"], "outputs_requested": [{"name": "average_sst", "variable_type": "scalar_float", "description": "Average sea surface temperature in the Gulf of Mexico on June 1, 2023"}, {"name": "min_sst", "variable_type": "scalar_float", "description": "Minimum sea surface temperature in the Gulf of Mexico on June 1, 2023"}, {"name": "max_sst", "variable_type": "scalar_float", "description": "Maximum sea surface temperature in the Gulf of Mexico on June 1, 2023"}, {"name": "sst_map", "variable_type": "raster_plot", "description": "Spatial map of sea surface temperature in the Gulf of Mexico on June 1, 2023"}]}}"""  # noqa: E501
 
         parsed_input = DataAnalysisToolInput.model_validate(input_str)
 

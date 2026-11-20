@@ -1,35 +1,40 @@
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Sequence
 from string import Template
-from typing import Any, override
+from typing import Any
 
-from e84_geoai_common.llm.core import (
-    LLMInferenceConfig,
-    LLMMessage,
-    LLMToolChoice,
-    LLMToolResultContent,
-    LLMToolUseContent,
-)
-from langfuse import observe  # pyright: ignore[reportUnknownVariableType]
+from langfuse import observe  # type: ignore[reportUnknownVariableType]
+from pydantic_ai import Agent, AgentRunResultEvent, AgentStreamEvent
+from pydantic_ai.messages import ModelMessage
+from pydantic_ai.models import Model
+from pydantic_ai.models.bedrock import BedrockModelSettings
+from pydantic_ai.usage import UsageLimits
 from rich.pretty import pretty_repr
 
-from llm_agent.agents.tool_only_agent import (
-    ToolOnlyAgent,
-    ToolsConfig,
-)
-from llm_agent.context import LLMAgentContext, ToolProgressUpdate
-from llm_agent.utils.prompt_as_service import PromptService
+from llm_agent.agents.orchestration_agent.interface import UserMessage
+from llm_agent.context import AgentDeps, ChatContext, ProgressCallback
+from llm_agent.tools.agent_tool import AgentTool
+from llm_agent.tools.response_shaping_tool import ResponseShapingTool
+from llm_agent.utils.langfuse import stream_events_to_final_output
 from llm_agent.utils.utils import get_current_date
 
 log = logging.getLogger(__name__)
 
+DEFAULT_MAX_ALLOWED_TOOL_CALLS_PER_TURN = 20
+
 DEFAULT_MAX_OUTPUT_TOKENS = 10_000
 
-ORCHESTRATION_AGENT_SYSTEM_PROMPT_TEMPLATE = Template("""\
+_SYSTEM_PROMPT_TEMPLATE = Template("""\
 Task:
 You are a helpful assistant, specializing in assisting users with complex \
 data-related tasks by breaking them down into simpler sub-tasks and completing them \
 using the tools at your disposal.
+
+Input schema:
+You will receive input in the following JSON schema:
+```json
+${input_schema}
+```
 
 Persona:
 - You help users interpret the results from your tools.
@@ -37,7 +42,9 @@ Persona:
 - Your responses are clear and to-the-point without being curt.
 
 Constraints:
-- You communicate using tool calls only and try to parallelize tool calls where reasonable.
+- You interleave brief explanatory text with tool calls, and parallelize tool calls where \
+reasonable. When you have finished addressing the user's request, reply with a plain text \
+message; replying with text and no tool calls ends your turn.
 - You DO NOT write any code.
 - Your tools are capable of geocoding natural language queries to locations. Do not attempt to \
 reproduce geospatial coordinates from memory unless explicitly instructed to do so.
@@ -47,6 +54,8 @@ when this is the case.
 sure about how to fix it.
 - You describe your actions at a higher level of abstraction e.g. "I'm doing XYZ" \
 instead of "I'm using such-and-such tool", unless asked otherwise.
+- For multi-step tasks, communicate the sequence of steps you plan to take up front, and \
+report progress as you complete them.
 
 Target audience:
 - The users are experts.
@@ -55,75 +64,109 @@ Context:
 - The current date is: ${current_date}.
 - The users will interact with you through a chat UI.
 - The users will be able to see tool calls and outputs in the UI.
+- The user's message may include an attached_data section listing references to data \
+they have provided. You can pass these references to your tools or resolve image references \
+to view them.
 """)
 
 
-# NOTE: We have decided to defer unifying the implementations of running
-# queries and handling tool call between the `OrchestrationAgent` and the
-# `DatasetPickingAgent`. However, the logic is highly similar and should be
-# consolidated in something like a `ToolUsingAgent` the next time we write
-# similar functionality.
-class OrchestrationAgent(ToolOnlyAgent):
-    """Agent that orchestrates a complex workflow using tools."""
+class OrchestrationAgent:
+    """Agent that orchestrates a complex workflow using tools.
+
+    Wraps a Pydantic AI ``Agent`` whose output is free text: the model interleaves
+    text with tool calls, and a text-only reply (no tool calls) ends the turn.
+    """
 
     def __init__(
         self,
-        prompt_service: PromptService,
+        model: Model,
         *,
-        tools_config: ToolsConfig | None = None,
-        inference_cfg: LLMInferenceConfig | None = None,
+        system_prompt: str | None = None,
+        tools: Sequence[AgentTool[Any, Any]] | None = None,
+        response_shaping_tools: Sequence[ResponseShapingTool[Any]] | None = None,
+        max_allowed_tool_calls_per_turn: int = DEFAULT_MAX_ALLOWED_TOOL_CALLS_PER_TURN,
     ) -> None:
         """Constructor.
 
         Args:
-            prompt_service (PromptService): Service to call to invoke the model
-
-            tools_config (ToolsConfig): ToolsConfig for the model invocation to
-                use. None to get default.
-
-            inference_cfg (LLMInferenceConfig | None): Inference config.
+            model: The Pydantic AI model to drive the agent. Build one with
+                ``llm_agent.model_factory.make_bedrock_model``.
+            system_prompt: Optional system prompt to override the default.
+            tools: Tools the agent may use. The consumer is responsible for any
+                wrapping (e.g. ``TrackingTool``) before passing them in.
+            response_shaping_tools: Tools used to elicit structured outputs (e.g.
+                an agent plan). Their input schemas are the structured models the
+                agent can emit.
+            max_allowed_tool_calls_per_turn: Maximum allowed tool calls per turn.
         """
-        self.system_prompt = ORCHESTRATION_AGENT_SYSTEM_PROMPT_TEMPLATE.substitute(
-            current_date=get_current_date(),
+        registered_tools = [
+            *(tool.as_pydantic_tool() for tool in tools or []),
+            *(tool.as_pydantic_tool() for tool in response_shaping_tools or []),
+        ]
+        self._usage_limits = UsageLimits(tool_calls_limit=max_allowed_tool_calls_per_turn)
+
+        model_settings = BedrockModelSettings(
+            bedrock_cache_instructions=True,
+            bedrock_cache_tool_definitions=True,
         )
-        if inference_cfg is not None:
-            if inference_cfg.system_prompt is not None:
-                msg = "LLMInferenceConfig.system_prompt must not be set"
-                raise ValueError(msg)
-        else:
-            inference_cfg = LLMInferenceConfig(
-                system_prompt=self.system_prompt,
-                tool_choice=LLMToolChoice(mode="force_tool_use", tool_name=None),
-                temperature=0,
-                json_mode=False,
-                max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-            )
+        if model.settings:
+            if model.settings.get("temperature") is None:
+                model.settings["temperature"] = 0.0
+            if model.settings.get("max_tokens") is None:
+                model.settings["max_tokens"] = DEFAULT_MAX_OUTPUT_TOKENS
 
-        super().__init__(
-            prompt_service=prompt_service,
-            tools_config=tools_config,
-            inference_cfg=inference_cfg,
+        self._agent = Agent(
+            model,
+            deps_type=AgentDeps,
+            output_type=str,
+            instructions=system_prompt or _build_system_prompt(),
+            model_settings=model_settings,
+            tools=registered_tools,
         )
 
-        log.info("System prompt:\n%s", pretty_repr(self.system_prompt))
-        log.info("Tools:\n\n%s", _tool_output_from_tools_config(self.tools_config))
-
-    @observe(as_type="agent", name="OrchestrationAgent.run")
-    @override
-    def run(
+    @observe(as_type="agent", name=__name__)
+    async def run(
         self,
-        context: LLMAgentContext,
-        conversation: list[LLMMessage],
-        progress_callback: Callable[[ToolProgressUpdate[Any]], None] | None = None,
-    ) -> AsyncGenerator[LLMToolUseContent | LLMToolResultContent]:
-        return super().run(context, conversation, progress_callback)
+        chat_context: ChatContext,
+        user_message: UserMessage,
+        *,
+        message_history: list[ModelMessage] | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> str:
+        """Run the agent and return the final text response."""
+        deps = AgentDeps(chat_context=chat_context, progress_callback=progress_callback)
+        result = await self._agent.run(
+            user_message.model_dump_json(),
+            deps=deps,
+            message_history=message_history,
+            usage_limits=self._usage_limits,
+        )
+        log.info("OrchestrationAgent response: %s", pretty_repr(result.output))
+        return result.output
+
+    @observe(as_type="agent", name=__name__, transform_to_string=stream_events_to_final_output)
+    async def run_stream(
+        self,
+        chat_context: ChatContext,
+        user_message: UserMessage,
+        *,
+        message_history: list[ModelMessage] | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent | AgentRunResultEvent[str]]:
+        """Run the agent, streaming text deltas plus tool call/result events in realtime."""
+        deps = AgentDeps(chat_context=chat_context, progress_callback=progress_callback)
+        async with self._agent.run_stream_events(
+            user_message.model_dump_json(),
+            deps=deps,
+            message_history=message_history,
+            usage_limits=self._usage_limits,
+        ) as stream:
+            async for event in stream:
+                log.debug("OrchestrationAgent stream event: %s", pretty_repr(event))
+                yield event
 
 
-def _tool_output_from_tools_config(tools_config: ToolsConfig) -> str:
-    messages = [
-        pretty_repr(tool.tool_spec.input_model.model_json_schema())
-        for tool in tools_config.tool_name_to_tool.values()
-        if tool.tool_spec.input_model is not None
-    ]
-
-    return "\n".join(messages)
+def _build_system_prompt() -> str:
+    return _SYSTEM_PROMPT_TEMPLATE.substitute(
+        input_schema=UserMessage.model_json_schema(), current_date=get_current_date()
+    )
